@@ -99,10 +99,20 @@ pub struct NewSessionDialog {
     pub(super) loading: bool,
     /// Spinner animation frame counter
     pub(super) spinner_frame: usize,
+    /// Path autocomplete suggestions
+    pub(super) path_suggestions: Vec<String>,
+    /// Currently selected suggestion index
+    pub(super) path_suggestion_index: usize,
+    /// Whether to show path suggestions popup
+    pub(super) show_path_suggestions: bool,
 }
 
 impl NewSessionDialog {
-    pub fn new(tools: AvailableTools, existing_titles: Vec<String>) -> Self {
+    pub fn new(
+        tools: AvailableTools,
+        existing_titles: Vec<String>,
+        default_group: Option<String>,
+    ) -> Self {
         let current_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
@@ -113,7 +123,7 @@ impl NewSessionDialog {
         Self {
             title: Input::default(),
             path: Input::new(current_dir),
-            group: Input::default(),
+            group: Input::new(default_group.unwrap_or_default()),
             tool_index: 0,
             focused_field: 0,
             available_tools,
@@ -128,6 +138,9 @@ impl NewSessionDialog {
             show_help: false,
             loading: false,
             spinner_frame: 0,
+            path_suggestions: Vec::new(),
+            path_suggestion_index: 0,
+            show_path_suggestions: false,
         }
     }
 
@@ -169,11 +182,93 @@ impl NewSessionDialog {
             show_help: false,
             loading: false,
             spinner_frame: 0,
+            path_suggestions: Vec::new(),
+            path_suggestion_index: 0,
+            show_path_suggestions: false,
         }
     }
 
     pub fn set_error(&mut self, error: String) {
         self.error_message = Some(error);
+    }
+
+    /// Scan directory and return suggestions matching the partial path.
+    /// Returns up to 8 directory suggestions.
+    fn scan_directory_suggestions(partial_path: &str) -> Vec<String> {
+        use std::path::Path;
+
+        if partial_path.is_empty() {
+            return Vec::new();
+        }
+
+        let path = Path::new(partial_path);
+
+        // Determine base directory and prefix to filter
+        let (base_dir, prefix) = if partial_path.ends_with('/') || partial_path.ends_with('\\') {
+            // Path ends with separator, scan that directory
+            (path.to_path_buf(), String::new())
+        } else if path.is_dir() {
+            // Path is a complete directory, scan it
+            (path.to_path_buf(), String::new())
+        } else {
+            // Path is partial, scan parent and filter by filename prefix
+            let parent = path.parent().unwrap_or(Path::new("/"));
+            let prefix = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            (parent.to_path_buf(), prefix)
+        };
+
+        let Ok(entries) = std::fs::read_dir(&base_dir) else {
+            return Vec::new();
+        };
+
+        let mut suggestions: Vec<String> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                // Only include directories
+                entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+            })
+            .filter(|entry| {
+                // Filter by prefix (case-insensitive)
+                if prefix.is_empty() {
+                    true
+                } else {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .starts_with(&prefix)
+                }
+            })
+            .filter(|entry| {
+                // Skip hidden directories
+                !entry.file_name().to_string_lossy().starts_with('.')
+            })
+            .map(|entry| entry.path().to_string_lossy().to_string())
+            .collect();
+
+        suggestions.sort();
+        suggestions.truncate(8);
+        suggestions
+    }
+
+    /// Update path suggestions based on current path value.
+    fn update_path_suggestions(&mut self) {
+        let path_value = self.path.value().to_string();
+        self.path_suggestions = Self::scan_directory_suggestions(&path_value);
+        self.path_suggestion_index = 0;
+        self.show_path_suggestions = !self.path_suggestions.is_empty();
+    }
+
+    /// Accept the currently selected path suggestion.
+    fn accept_path_suggestion(&mut self) {
+        if let Some(suggestion) = self.path_suggestions.get(self.path_suggestion_index) {
+            self.path = Input::new(suggestion.clone());
+            self.show_path_suggestions = false;
+            self.path_suggestions.clear();
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
@@ -233,6 +328,45 @@ impl NewSessionDialog {
         } else {
             worktree_field + 1
         };
+
+        // Handle path suggestions navigation when shown
+        if self.show_path_suggestions && self.focused_field == 1 {
+            match key.code {
+                KeyCode::Up => {
+                    if self.path_suggestion_index > 0 {
+                        self.path_suggestion_index -= 1;
+                    } else {
+                        self.path_suggestion_index = self.path_suggestions.len().saturating_sub(1);
+                    }
+                    return DialogResult::Continue;
+                }
+                KeyCode::Down => {
+                    if self.path_suggestion_index + 1 < self.path_suggestions.len() {
+                        self.path_suggestion_index += 1;
+                    } else {
+                        self.path_suggestion_index = 0;
+                    }
+                    return DialogResult::Continue;
+                }
+                KeyCode::Tab => {
+                    self.accept_path_suggestion();
+                    return DialogResult::Continue;
+                }
+                KeyCode::Esc => {
+                    self.show_path_suggestions = false;
+                    return DialogResult::Continue;
+                }
+                KeyCode::Enter => {
+                    // Accept suggestion and stay in dialog
+                    self.accept_path_suggestion();
+                    return DialogResult::Continue;
+                }
+                _ => {
+                    // Hide suggestions and continue processing the key
+                    self.show_path_suggestions = false;
+                }
+            }
+        }
 
         match key.code {
             KeyCode::Char('?') => {
@@ -320,9 +454,14 @@ impl NewSessionDialog {
                     && self.focused_field != sandbox_field
                     && self.focused_field != yolo_mode_field
                 {
+                    let was_path_field = self.focused_field == 1;
                     self.current_input_mut()
                         .handle_event(&crossterm::event::Event::Key(key));
                     self.error_message = None;
+                    // Update path suggestions after editing path field
+                    if was_path_field {
+                        self.update_path_suggestions();
+                    }
                 }
                 DialogResult::Continue
             }

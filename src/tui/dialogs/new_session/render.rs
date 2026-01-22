@@ -303,6 +303,55 @@ impl NewSessionDialog {
         if self.show_help {
             self.render_help_overlay(frame, area, theme);
         }
+
+        // Render path suggestions popup
+        if self.show_path_suggestions && !self.path_suggestions.is_empty() {
+            self.render_path_suggestions(frame, dialog_area, theme);
+        }
+    }
+
+    fn render_path_suggestions(&self, frame: &mut Frame, dialog_area: Rect, theme: &Theme) {
+        // Position the popup below the Path field (which is at index 1 in the layout)
+        // The Path field starts at y + 1 (margin) + 2 (title height) = y + 3
+        // The popup should appear below it at y + 3 + 2 (path height) = y + 5
+        let popup_x = dialog_area.x + 2;
+        let popup_y = dialog_area.y + 5;
+        let popup_width = dialog_area.width.saturating_sub(4);
+        let popup_height = (self.path_suggestions.len() as u16 + 2).min(10);
+
+        let popup_area = Rect {
+            x: popup_x,
+            y: popup_y,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().bg(theme.background));
+
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let items: Vec<ListItem> = self
+            .path_suggestions
+            .iter()
+            .enumerate()
+            .map(|(idx, path)| {
+                let style = if idx == self.path_suggestion_index {
+                    Style::default().fg(theme.accent).bg(theme.selection)
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                ListItem::new(Line::from(Span::styled(path, style)))
+            })
+            .collect();
+
+        let list = List::new(items);
+        frame.render_widget(list, inner);
     }
 
     fn render_help_overlay(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

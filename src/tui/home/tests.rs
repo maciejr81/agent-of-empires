@@ -165,6 +165,7 @@ fn test_has_dialog_returns_true_for_new_dialog() {
             opencode: false,
         },
         Vec::new(),
+        None,
     ));
     assert!(env.view.has_dialog());
 }

@@ -149,6 +149,21 @@ impl HomeView {
         })
     }
 
+    pub fn toggle_user_active(&mut self) -> anyhow::Result<()> {
+        if let Some(session_id) = &self.selected_session {
+            let session_id = session_id.clone();
+            if let Some(inst) = self.instances.iter_mut().find(|i| i.id == session_id) {
+                inst.user_active = !inst.user_active;
+            }
+            if let Some(inst) = self.instance_map.get_mut(&session_id) {
+                inst.user_active = !inst.user_active;
+            }
+            self.storage
+                .save_with_groups(&self.instances, &self.group_tree)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn rename_selected(&mut self, new_title: &str) -> anyhow::Result<()> {
         if let Some(id) = &self.selected_session {
             let id = id.clone();

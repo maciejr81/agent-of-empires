@@ -94,6 +94,12 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_info: Option<TerminalInfo>,
 
+    /// Whether the session is marked as actively worked on by the user.
+    /// Independent of agent status (Running/Waiting/Idle).
+    /// Persisted to sessions.json and remembered between launches.
+    #[serde(default)]
+    pub user_active: bool,
+
     // Runtime state (not serialized)
     #[serde(skip)]
     pub last_error_check: Option<std::time::Instant>,
@@ -127,6 +133,7 @@ impl Instance {
             worktree_info: None,
             sandbox_info: None,
             terminal_info: None,
+            user_active: false,
             last_error_check: None,
             last_start_time: None,
             last_error: None,

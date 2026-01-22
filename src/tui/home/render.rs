@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use super::{
     get_indent, HomeView, ViewMode, ICON_COLLAPSED, ICON_DELETING, ICON_ERROR, ICON_EXPANDED,
-    ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_WAITING,
+    ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_USER_ACTIVE, ICON_WAITING,
 };
 use crate::session::{Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
@@ -245,9 +245,35 @@ impl HomeView {
             }
         };
 
-        let mut line_spans = Vec::with_capacity(5);
+        let mut line_spans = Vec::with_capacity(6);
         line_spans.push(Span::raw(indent));
         line_spans.push(Span::styled(format!("{} ", icon), style));
+
+        // User-active indicator column (fixed width for alignment)
+        if let Item::Session { id, .. } = item {
+            if let Some(inst) = self.instance_map.get(id) {
+                if inst.user_active {
+                    // Brighter version of the status color for the star
+                    let bright_style = match style.fg {
+                        Some(Color::Rgb(r, g, b)) => {
+                            // Brighten by moving towards white
+                            let brighten = |c: u8| c.saturating_add((255 - c) / 2);
+                            Style::default().fg(Color::Rgb(brighten(r), brighten(g), brighten(b)))
+                        }
+                        _ => style,
+                    };
+                    line_spans.push(Span::styled(format!("{} ", ICON_USER_ACTIVE), bright_style));
+                } else {
+                    line_spans.push(Span::raw("  ")); // Same width as "★ "
+                }
+            } else {
+                line_spans.push(Span::raw("  "));
+            }
+        } else {
+            // Groups don't have user_active, but need spacing for alignment
+            line_spans.push(Span::raw("  "));
+        }
+
         line_spans.push(Span::styled(
             text.into_owned(),
             if is_selected { style.bold() } else { style },
@@ -454,6 +480,29 @@ impl HomeView {
                 Span::styled("│", sep_style),
                 Span::styled(" d", key_style),
                 Span::styled(" Del ", desc_style),
+            ]);
+        }
+
+        if self.selected_session.is_some() {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" a", key_style),
+                Span::styled(" Active ", desc_style),
+            ]);
+        }
+
+        // Show filter indicator or filter toggle hint
+        if self.filter_user_active {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" A", key_style),
+                Span::styled(" [★ ON] ", Style::default().fg(theme.accent)),
+            ]);
+        } else {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" A", key_style),
+                Span::styled(" Filter★ ", desc_style),
             ]);
         }
 

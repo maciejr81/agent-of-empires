@@ -213,9 +213,11 @@ impl HomeView {
             KeyCode::Char('n') => {
                 let existing_titles: Vec<String> =
                     self.instances.iter().map(|i| i.title.clone()).collect();
+                let default_group = self.get_current_group_context();
                 self.new_dialog = Some(NewSessionDialog::new(
                     self.available_tools.clone(),
                     existing_titles,
+                    default_group,
                 ));
             }
             KeyCode::Char('d') => {
@@ -348,6 +350,18 @@ impl HomeView {
                     }
                 }
             }
+            KeyCode::Char('a') => {
+                if self.selected_session.is_some() {
+                    if let Err(e) = self.toggle_user_active() {
+                        tracing::error!("Failed to toggle user-active: {}", e);
+                    }
+                }
+            }
+            KeyCode::Char('A') => {
+                // Shift+A: Toggle filter by user_active
+                self.filter_user_active = !self.filter_user_active;
+                self.update_user_active_filter();
+            }
             _ => {}
         }
 
@@ -432,6 +446,61 @@ impl HomeView {
                 Item::Group { name, path, .. } => {
                     if name.to_lowercase().contains(&query) || path.to_lowercase().contains(&query)
                     {
+                        matches.push(idx);
+                    }
+                }
+            }
+        }
+
+        self.filtered_items = Some(matches);
+        self.cursor = 0;
+        self.update_selected();
+    }
+
+    /// Update filter to show only user_active sessions and their parent groups
+    pub(super) fn update_user_active_filter(&mut self) {
+        if !self.filter_user_active {
+            self.filtered_items = None;
+            self.cursor = 0;
+            self.update_selected();
+            return;
+        }
+
+        // First, find all active session IDs
+        let active_session_ids: std::collections::HashSet<String> = self
+            .instances
+            .iter()
+            .filter(|i| i.user_active)
+            .map(|i| i.id.clone())
+            .collect();
+
+        // Find all group paths that contain active sessions
+        let active_group_paths: std::collections::HashSet<String> = self
+            .instances
+            .iter()
+            .filter(|i| i.user_active && !i.group_path.is_empty())
+            .flat_map(|i| {
+                // Include all parent groups
+                let mut paths = Vec::new();
+                let parts: Vec<&str> = i.group_path.split('/').collect();
+                for n in 1..=parts.len() {
+                    paths.push(parts[..n].join("/"));
+                }
+                paths
+            })
+            .collect();
+
+        let mut matches = Vec::new();
+
+        for (idx, item) in self.flat_items.iter().enumerate() {
+            match item {
+                Item::Session { id, .. } => {
+                    if active_session_ids.contains(id) {
+                        matches.push(idx);
+                    }
+                }
+                Item::Group { path, .. } => {
+                    if active_group_paths.contains(path) {
                         matches.push(idx);
                     }
                 }

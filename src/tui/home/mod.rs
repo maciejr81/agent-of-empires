@@ -75,6 +75,7 @@ pub(super) const ICON_STARTING: &str = "◌";
 pub(super) const ICON_DELETING: &str = "✗";
 pub(super) const ICON_COLLAPSED: &str = "▶";
 pub(super) const ICON_EXPANDED: &str = "▼";
+pub(super) const ICON_USER_ACTIVE: &str = "★";
 
 pub struct HomeView {
     pub(super) storage: Storage,
@@ -105,6 +106,9 @@ pub struct HomeView {
     pub(super) search_active: bool,
     pub(super) search_query: Input,
     pub(super) filtered_items: Option<Vec<usize>>,
+
+    // Filter by user_active
+    pub(super) filter_user_active: bool,
 
     // Tool availability
     pub(super) available_tools: AvailableTools,
@@ -164,6 +168,7 @@ impl HomeView {
             search_active: false,
             search_query: Input::default(),
             filtered_items: None,
+            filter_user_active: false,
             available_tools,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
@@ -460,5 +465,24 @@ impl HomeView {
                 }
             }
         }
+    }
+
+    /// Returns the current group context based on selection.
+    /// If a group is selected, returns its path.
+    /// If a session is selected and belongs to a group, returns that group path.
+    pub fn get_current_group_context(&self) -> Option<String> {
+        // If a group is selected, return its path
+        if let Some(group_path) = &self.selected_group {
+            return Some(group_path.clone());
+        }
+        // If a session is selected, return its group_path (if not empty)
+        if let Some(session_id) = &self.selected_session {
+            if let Some(inst) = self.instance_map.get(session_id) {
+                if !inst.group_path.is_empty() {
+                    return Some(inst.group_path.clone());
+                }
+            }
+        }
+        None
     }
 }

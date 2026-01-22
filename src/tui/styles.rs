@@ -28,6 +28,7 @@ pub struct Theme {
     pub group: Color,
     pub search: Color,
     pub accent: Color,
+    pub user_active: Color,
 }
 
 impl Default for Theme {
@@ -59,6 +60,7 @@ impl Theme {
             group: Color::Rgb(100, 220, 160),
             search: Color::Rgb(180, 255, 200),
             accent: Color::Rgb(57, 255, 20),
+            user_active: Color::Rgb(255, 215, 0), // Gold
         }
     }
 
@@ -85,6 +87,7 @@ impl Theme {
             group: Color::Rgb(187, 154, 247),
             search: Color::Rgb(125, 207, 255),
             accent: Color::Rgb(122, 162, 247),
+            user_active: Color::Rgb(255, 215, 0), // Gold
         }
     }
 }
