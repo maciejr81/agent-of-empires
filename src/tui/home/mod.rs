@@ -21,6 +21,7 @@ use super::dialogs::{
     ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, InfoDialog, NewSessionData,
     NewSessionDialog, RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
+use super::settings::SettingsView;
 use super::status_poller::StatusPoller;
 
 /// View mode for the home screen
@@ -128,6 +129,11 @@ pub struct HomeView {
     // Performance: preview caching
     pub(super) preview_cache: PreviewCache,
     pub(super) terminal_preview_cache: PreviewCache,
+
+    // Settings view
+    pub(super) settings_view: Option<SettingsView>,
+    /// Flag to indicate we're confirming settings close (unsaved changes)
+    pub(super) settings_close_confirm: bool,
 }
 
 impl HomeView {
@@ -177,6 +183,8 @@ impl HomeView {
             creation_cancelled: false,
             preview_cache: PreviewCache::default(),
             terminal_preview_cache: PreviewCache::default(),
+            settings_view: None,
+            settings_close_confirm: false,
         };
 
         view.update_selected();
@@ -399,6 +407,7 @@ impl HomeView {
             || self.welcome_dialog.is_some()
             || self.changelog_dialog.is_some()
             || self.info_dialog.is_some()
+            || self.settings_view.is_some()
     }
 
     pub fn show_welcome(&mut self) {

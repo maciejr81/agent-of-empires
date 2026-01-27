@@ -33,6 +33,7 @@ fn create_test_env_empty() -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -54,6 +55,7 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -81,6 +83,7 @@ fn create_test_env_with_groups() -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -163,6 +166,7 @@ fn test_has_dialog_returns_true_for_new_dialog() {
         AvailableTools {
             claude: true,
             opencode: false,
+            codex: false,
         },
         Vec::new(),
         None,
@@ -589,6 +593,7 @@ fn test_get_next_profile_cycles_through_profiles() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -610,6 +615,7 @@ fn test_get_next_profile_wraps_around() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -630,6 +636,7 @@ fn test_uppercase_p_returns_switch_profile_action() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let mut view = HomeView::new(storage, tools).unwrap();
 
@@ -710,6 +717,29 @@ fn test_has_dialog_includes_info_dialog() {
     assert!(view.has_dialog());
 }
 
+#[test]
+#[serial]
+fn test_has_dialog_includes_settings_view() {
+    use crate::tui::settings::SettingsView;
+
+    let env = create_test_env_empty();
+    let mut view = env.view;
+
+    assert!(!view.has_dialog());
+
+    view.settings_view = Some(SettingsView::new("test").unwrap());
+    assert!(view.has_dialog());
+}
+
+#[test]
+#[serial]
+fn test_s_opens_settings_view() {
+    let mut env = create_test_env_empty();
+    assert!(env.view.settings_view.is_none());
+    env.view.handle_key(key(KeyCode::Char('s')));
+    assert!(env.view.settings_view.is_some());
+}
+
 // Group deletion tests
 
 fn create_test_env_with_group_sessions() -> TestEnv {
@@ -753,6 +783,7 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -781,11 +812,12 @@ fn test_group_has_managed_worktrees() {
     let mut inst2 = Instance::new("other-session", "/tmp/other");
     inst2.group_path = "other".to_string();
 
-    storage.save(&vec![inst1, inst2]).unwrap();
+    storage.save(&[inst1, inst2]).unwrap();
 
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -816,11 +848,12 @@ fn test_group_has_containers() {
     let mut inst2 = Instance::new("other-session", "/tmp/other");
     inst2.group_path = "other".to_string();
 
-    storage.save(&vec![inst1, inst2]).unwrap();
+    storage.save(&[inst1, inst2]).unwrap();
 
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -933,11 +966,12 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
         cleanup_on_delete: true,
     });
 
-    storage.save(&vec![inst1]).unwrap();
+    storage.save(&[inst1]).unwrap();
 
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let mut view = HomeView::new(storage, tools).unwrap();
 
@@ -980,11 +1014,12 @@ fn test_delete_group_with_sessions_respects_container_option() {
         yolo_mode: None,
     });
 
-    storage.save(&vec![inst1]).unwrap();
+    storage.save(&[inst1]).unwrap();
 
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        codex: false,
     };
     let mut view = HomeView::new(storage, tools).unwrap();
 

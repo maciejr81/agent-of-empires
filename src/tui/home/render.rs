@@ -21,6 +21,18 @@ impl HomeView {
         theme: &Theme,
         update_info: Option<&UpdateInfo>,
     ) {
+        // Settings view takes over the whole screen
+        if let Some(ref settings) = self.settings_view {
+            settings.render(frame, area, theme);
+            // Render unsaved changes confirmation dialog over settings
+            if self.settings_close_confirm {
+                if let Some(dialog) = &self.confirm_dialog {
+                    dialog.render(frame, area, theme);
+                }
+            }
+            return;
+        }
+
         // Layout: main area + status bar + optional update bar at bottom
         let constraints = if update_info.is_some() {
             vec![

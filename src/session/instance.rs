@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::docker::{
-    self, ContainerConfig, DockerContainer, VolumeMount, CLAUDE_AUTH_VOLUME, OPENCODE_AUTH_VOLUME,
+    self, ContainerConfig, DockerContainer, VolumeMount, CLAUDE_AUTH_VOLUME, CODEX_AUTH_VOLUME,
+    OPENCODE_AUTH_VOLUME,
 };
 use crate::tmux;
 
@@ -168,6 +169,7 @@ impl Instance {
             match self.tool.as_str() {
                 "claude" => "claude",
                 "opencode" => "opencode",
+                "codex" => "codex",
                 _ => "bash",
             }
         } else {
@@ -197,8 +199,14 @@ impl Instance {
     pub fn start_terminal_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
         let session = self.terminal_tmux_session()?;
 
-        if !session.exists() {
+        let is_new = !session.exists();
+        if is_new {
             session.create_with_size(&self.project_path, size)?;
+        }
+
+        // Apply all configured tmux options to terminal sessions too
+        if is_new {
+            self.apply_terminal_tmux_options();
         }
 
         self.terminal_info = Some(TerminalInfo {
@@ -231,29 +239,33 @@ impl Instance {
         let cmd = if self.is_sandboxed() {
             self.ensure_container_running()?;
             let sandbox = self.sandbox_info.as_ref().unwrap();
-            let tool_cmd = if self.is_yolo_mode() && self.tool == "claude" {
-                "claude --dangerously-skip-permissions".to_string()
+            let tool_cmd = if self.is_yolo_mode() {
+                match self.tool.as_str() {
+                    "claude" => "claude --dangerously-skip-permissions".to_string(),
+                    "codex" => "codex --dangerously-bypass-approvals-and-sandbox".to_string(),
+                    _ => self.get_tool_command().to_string(),
+                }
             } else {
                 self.get_tool_command().to_string()
             };
-            Some(format!(
+            Some(wrap_command_ignore_suspend(&format!(
                 "docker exec -it {} {}",
                 sandbox.container_name, tool_cmd
-            ))
+            )))
         } else if self.command.is_empty() {
-            if self.tool == "claude" {
-                Some("claude".to_string())
-            } else {
-                None
+            match self.tool.as_str() {
+                "claude" => Some(wrap_command_ignore_suspend("claude")),
+                "codex" => Some(wrap_command_ignore_suspend("codex")),
+                _ => None,
             }
         } else {
-            Some(self.command.clone())
+            Some(wrap_command_ignore_suspend(&self.command))
         };
 
         session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
 
-        // Apply tmux status bar styling if enabled
-        self.apply_tmux_status_bar();
+        // Apply all configured tmux options (status bar, mouse, etc.)
+        self.apply_tmux_options();
 
         self.status = Status::Starting;
         self.last_start_time = Some(std::time::Instant::now());
@@ -261,14 +273,9 @@ impl Instance {
         Ok(())
     }
 
-    /// Apply tmux status bar configuration to show session info.
-    fn apply_tmux_status_bar(&self) {
-        use crate::session::config::should_apply_tmux_status_bar;
-        use crate::tmux::status_bar::{apply_status_bar, SandboxDisplay};
-
-        if !should_apply_tmux_status_bar() {
-            return;
-        }
+    /// Apply all configured tmux options (status bar, mouse, etc.) to the agent session.
+    fn apply_tmux_options(&self) {
+        use crate::tmux::status_bar::{apply_all_tmux_options, SandboxDisplay};
 
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
         let branch = self.worktree_info.as_ref().map(|w| w.branch.as_str());
@@ -282,9 +289,27 @@ impl Instance {
             }
         });
 
-        if let Err(e) = apply_status_bar(&session_name, &self.title, branch, sandbox.as_ref()) {
-            tracing::debug!("Failed to apply tmux status bar: {}", e);
-        }
+        apply_all_tmux_options(&session_name, &self.title, branch, sandbox.as_ref());
+    }
+
+    /// Apply all configured tmux options to the terminal session.
+    fn apply_terminal_tmux_options(&self) {
+        use crate::tmux::status_bar::{apply_all_tmux_options, SandboxDisplay};
+
+        let session_name = tmux::TerminalSession::generate_name(&self.id, &self.title);
+        let terminal_title = format!("{} (terminal)", self.title);
+        let branch = self.worktree_info.as_ref().map(|w| w.branch.as_str());
+        let sandbox = self.sandbox_info.as_ref().and_then(|s| {
+            if s.enabled {
+                Some(SandboxDisplay {
+                    container_name: s.container_name.clone(),
+                })
+            } else {
+                None
+            }
+        });
+
+        apply_all_tmux_options(&session_name, &terminal_title, branch, sandbox.as_ref());
     }
 
     fn ensure_container_running(&mut self) -> Result<()> {
@@ -310,6 +335,7 @@ impl Instance {
 
         docker::ensure_named_volume(CLAUDE_AUTH_VOLUME)?;
         docker::ensure_named_volume(OPENCODE_AUTH_VOLUME)?;
+        docker::ensure_named_volume(CODEX_AUTH_VOLUME)?;
 
         crate::migrations::run_lazy_docker_migrations();
 
@@ -378,6 +404,10 @@ impl Instance {
             (
                 OPENCODE_AUTH_VOLUME.to_string(),
                 format!("{}/.local/share/opencode", CONTAINER_HOME),
+            ),
+            (
+                CODEX_AUTH_VOLUME.to_string(),
+                format!("{}/.codex", CONTAINER_HOME),
             ),
         ];
 
@@ -521,11 +551,23 @@ fn generate_id() -> String {
     Uuid::new_v4().to_string().replace("-", "")[..16].to_string()
 }
 
+/// Wrap a command to disable Ctrl-Z (SIGTSTP) suspension.
+///
+/// When running agents directly as tmux session commands (without a parent shell),
+/// pressing Ctrl-Z suspends the process with no way to recover via job control.
+/// This wrapper disables the suspend character at the terminal level before exec'ing
+/// the actual command.
+///
+/// Uses POSIX-standard `stty susp undef` which works on both Linux and macOS.
+fn wrap_command_ignore_suspend(cmd: &str) -> String {
+    format!("bash -c 'stty susp undef; exec {}'", cmd)
+}
+
 /// Tools that have YOLO mode support configured.
 /// When adding a new tool, add it here and implement YOLO support in:
-/// - `start()` for command construction (Claude uses CLI flag)
+/// - `start()` for command construction (Claude and Codex use CLI flags)
 /// - `build_container_config()` for environment variables (OpenCode uses env var)
-pub const YOLO_SUPPORTED_TOOLS: &[&str] = &["claude", "opencode"];
+pub const YOLO_SUPPORTED_TOOLS: &[&str] = &["claude", "opencode", "codex"];
 
 #[cfg(test)]
 mod tests {
@@ -558,6 +600,7 @@ mod tests {
         let available_tools = crate::tmux::AvailableTools {
             claude: true,
             opencode: true,
+            codex: true,
         };
         for tool in available_tools.available_list() {
             assert!(
@@ -640,6 +683,13 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "opencode".to_string();
         assert_eq!(inst.get_tool_command(), "opencode");
+    }
+
+    #[test]
+    fn test_get_tool_command_codex() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "codex".to_string();
+        assert_eq!(inst.get_tool_command(), "codex");
     }
 
     #[test]

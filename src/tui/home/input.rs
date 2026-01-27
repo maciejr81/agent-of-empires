@@ -11,9 +11,56 @@ use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, InfoDialog,
     NewSessionDialog, RenameDialog, UnifiedDeleteDialog,
 };
+use crate::tui::settings::{SettingsAction, SettingsView};
 
 impl HomeView {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        // Handle unsaved changes confirmation for settings (shown over settings view)
+        if self.settings_close_confirm {
+            if let Some(dialog) = &mut self.confirm_dialog {
+                match dialog.handle_key(key) {
+                    DialogResult::Continue => return None,
+                    DialogResult::Cancel => {
+                        // User chose not to discard, go back to settings
+                        self.confirm_dialog = None;
+                        self.settings_close_confirm = false;
+                        return None;
+                    }
+                    DialogResult::Submit(_) => {
+                        // User chose to discard changes
+                        if let Some(ref mut settings) = self.settings_view {
+                            settings.force_close();
+                        }
+                        self.settings_view = None;
+                        self.confirm_dialog = None;
+                        self.settings_close_confirm = false;
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Handle settings view (full-screen takeover)
+        if let Some(ref mut settings) = self.settings_view {
+            match settings.handle_key(key) {
+                SettingsAction::Continue => return None,
+                SettingsAction::Close => {
+                    self.settings_view = None;
+                    return None;
+                }
+                SettingsAction::UnsavedChangesWarning => {
+                    // Show confirmation dialog
+                    self.confirm_dialog = Some(ConfirmDialog::new(
+                        "Unsaved Changes",
+                        "You have unsaved changes. Discard them?",
+                        "discard_settings",
+                    ));
+                    self.settings_close_confirm = true;
+                    return None;
+                }
+            }
+        }
+
         // Handle welcome/changelog dialogs first (highest priority)
         if let Some(dialog) = &mut self.welcome_dialog {
             match dialog.handle_key(key) {
@@ -159,9 +206,9 @@ impl HomeView {
                 DialogResult::Cancel => {
                     self.rename_dialog = None;
                 }
-                DialogResult::Submit(new_title) => {
+                DialogResult::Submit(data) => {
                     self.rename_dialog = None;
-                    if let Err(e) = self.rename_selected(&new_title) {
+                    if let Err(e) = self.rename_selected(&data.title, data.group.as_deref()) {
                         tracing::error!("Failed to rename session: {}", e);
                     }
                 }
@@ -219,6 +266,19 @@ impl HomeView {
                     existing_titles,
                     default_group,
                 ));
+            }
+            KeyCode::Char('s') => {
+                // Open settings view
+                match SettingsView::new(self.storage.profile()) {
+                    Ok(view) => self.settings_view = Some(view),
+                    Err(e) => {
+                        tracing::error!("Failed to open settings: {}", e);
+                        self.info_dialog = Some(InfoDialog::new(
+                            "Error",
+                            &format!("Failed to open settings: {}", e),
+                        ));
+                    }
+                }
             }
             KeyCode::Char('d') => {
                 // Deletion only allowed in Agent View
@@ -286,7 +346,7 @@ impl HomeView {
                         if inst.status == Status::Deleting {
                             return None;
                         }
-                        self.rename_dialog = Some(RenameDialog::new(&inst.title));
+                        self.rename_dialog = Some(RenameDialog::new(&inst.title, &inst.group_path));
                     }
                 }
             }

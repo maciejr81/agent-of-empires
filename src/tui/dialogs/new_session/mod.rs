@@ -11,7 +11,7 @@ use tui_input::Input;
 
 use super::DialogResult;
 use crate::docker;
-use crate::session::civilizations;
+use crate::session::{civilizations, Config};
 use crate::tmux::AvailableTools;
 
 pub(super) struct FieldHelp {
@@ -105,6 +105,8 @@ pub struct NewSessionDialog {
     pub(super) path_suggestion_index: usize,
     /// Whether to show path suggestions popup
     pub(super) show_path_suggestions: bool,
+    /// Whether a Docker image pull will be needed (image not present locally)
+    pub(super) needs_image_pull: bool,
 }
 
 impl NewSessionDialog {
@@ -120,20 +122,37 @@ impl NewSessionDialog {
         let available_tools = tools.available_list();
         let docker_available = docker::is_docker_available();
 
+        // Load config to get defaults
+        let config = Config::load().unwrap_or_default();
+
+        // Determine default tool index based on config
+        let tool_index = if let Some(ref default_tool) = config.session.default_tool {
+            available_tools
+                .iter()
+                .position(|&t| t == default_tool.as_str())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Apply sandbox defaults from config
+        let sandbox_enabled = docker_available && config.sandbox.enabled_by_default;
+        let yolo_mode = sandbox_enabled && config.sandbox.yolo_mode_default;
+
         Self {
             title: Input::default(),
             path: Input::new(current_dir),
             group: Input::new(default_group.unwrap_or_default()),
-            tool_index: 0,
+            tool_index,
             focused_field: 0,
             available_tools,
             existing_titles,
             worktree_branch: Input::default(),
             create_new_branch: true,
-            sandbox_enabled: false,
+            sandbox_enabled,
             sandbox_image: Input::new(docker::effective_default_image()),
             docker_available,
-            yolo_mode: false,
+            yolo_mode,
             error_message: None,
             show_help: false,
             loading: false,
@@ -141,6 +160,7 @@ impl NewSessionDialog {
             path_suggestions: Vec::new(),
             path_suggestion_index: 0,
             show_path_suggestions: false,
+            needs_image_pull: false,
         }
     }
 
@@ -149,6 +169,11 @@ impl NewSessionDialog {
         self.loading = loading;
         if loading {
             self.error_message = None;
+            // Check if image pull will be needed (only relevant for sandbox sessions)
+            if self.sandbox_enabled {
+                let image = self.sandbox_image.value().trim();
+                self.needs_image_pull = !docker::image_exists_locally(image);
+            }
         }
     }
 
@@ -185,6 +210,7 @@ impl NewSessionDialog {
             path_suggestions: Vec::new(),
             path_suggestion_index: 0,
             show_path_suggestions: false,
+            needs_image_pull: false,
         }
     }
 
@@ -379,14 +405,14 @@ impl NewSessionDialog {
             }
             KeyCode::Enter => {
                 self.error_message = None;
-                let title_value = self.title.value();
+                let title_value = self.title.value().trim();
                 let final_title = if title_value.is_empty() {
                     let refs: Vec<&str> = self.existing_titles.iter().map(|s| s.as_str()).collect();
                     civilizations::generate_random_title(&refs)
                 } else {
                     title_value.to_string()
                 };
-                let worktree_value = self.worktree_branch.value();
+                let worktree_value = self.worktree_branch.value().trim();
                 let worktree_branch = if worktree_value.is_empty() {
                     None
                 } else {
@@ -394,8 +420,8 @@ impl NewSessionDialog {
                 };
                 DialogResult::Submit(NewSessionData {
                     title: final_title,
-                    path: self.path.value().to_string(),
-                    group: self.group.value().to_string(),
+                    path: self.path.value().trim().to_string(),
+                    group: self.group.value().trim().to_string(),
                     tool: self.available_tools[self.tool_index].to_string(),
                     worktree_branch,
                     create_new_branch: self.create_new_branch,
@@ -434,7 +460,11 @@ impl NewSessionDialog {
                 if self.focused_field == sandbox_field =>
             {
                 self.sandbox_enabled = !self.sandbox_enabled;
-                if !self.sandbox_enabled {
+                if self.sandbox_enabled {
+                    // Apply yolo_mode_default when enabling sandbox
+                    let config = Config::load().unwrap_or_default();
+                    self.yolo_mode = config.sandbox.yolo_mode_default;
+                } else {
                     self.yolo_mode = false;
                     if self.focused_field > sandbox_field {
                         self.focused_field = sandbox_field;
