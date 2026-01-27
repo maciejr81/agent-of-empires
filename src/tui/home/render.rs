@@ -198,7 +198,7 @@ impl HomeView {
             Item::Group {
                 name,
                 collapsed,
-                session_count,
+                waiting_count,
                 ..
             } => {
                 let icon = if *collapsed {
@@ -206,8 +206,14 @@ impl HomeView {
                 } else {
                     ICON_EXPANDED
                 };
-                let text = Cow::Owned(format!("{} ({})", name, session_count));
-                let style = Style::default().fg(theme.group).bold();
+                // Show waiting count (sessions needing attention) instead of total
+                let text = if *waiting_count > 0 {
+                    Cow::Owned(format!("{} ({})", name, waiting_count))
+                } else {
+                    Cow::Borrowed(name.as_str())
+                };
+                // Use same style as sessions for better visual hierarchy
+                let style = Style::default().fg(theme.text);
                 (icon, text, style)
             }
             Item::Session { id, .. } => {

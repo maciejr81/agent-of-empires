@@ -465,14 +465,31 @@ impl HomeView {
     }
 
     pub fn select_session_by_id(&mut self, session_id: &str) {
-        for (idx, item) in self.flat_items.iter().enumerate() {
+        // First, find the flat_items index for this session
+        let flat_idx = self.flat_items.iter().enumerate().find_map(|(idx, item)| {
             if let Item::Session { id, .. } = item {
                 if id == session_id {
-                    self.cursor = idx;
-                    self.update_selected();
-                    return;
+                    return Some(idx);
                 }
             }
+            None
+        });
+
+        let Some(flat_idx) = flat_idx else {
+            return;
+        };
+
+        // If we have a filter active, find the cursor position in the filtered list
+        if let Some(ref filtered) = self.filtered_items {
+            if let Some(cursor_pos) = filtered.iter().position(|&idx| idx == flat_idx) {
+                self.cursor = cursor_pos;
+                self.update_selected();
+            }
+            // If session not in filtered list, don't change cursor
+        } else {
+            // No filter - use flat_items index directly
+            self.cursor = flat_idx;
+            self.update_selected();
         }
     }
 

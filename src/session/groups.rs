@@ -173,6 +173,8 @@ pub enum Item {
         depth: usize,
         collapsed: bool,
         session_count: usize,
+        /// Count of sessions with Waiting status (need user attention)
+        waiting_count: usize,
     },
     Session {
         id: String,
@@ -220,7 +222,7 @@ fn flatten_group(
     depth: usize,
     tree: &GroupTree,
 ) {
-    let session_count = count_sessions_in_group(&group.path, instances, tree);
+    let (session_count, waiting_count) = count_sessions_in_group(&group.path, instances, tree);
 
     items.push(Item::Group {
         path: group.path.clone(),
@@ -228,6 +230,7 @@ fn flatten_group(
         depth,
         collapsed: group.collapsed,
         session_count,
+        waiting_count,
     });
 
     if group.collapsed {
@@ -253,12 +256,23 @@ fn flatten_group(
     }
 }
 
-fn count_sessions_in_group(path: &str, instances: &[Instance], _tree: &GroupTree) -> usize {
+fn count_sessions_in_group(
+    path: &str,
+    instances: &[Instance],
+    _tree: &GroupTree,
+) -> (usize, usize) {
+    use super::Status;
     let prefix = format!("{}/", path);
-    instances
+    let matching: Vec<_> = instances
         .iter()
         .filter(|i| i.group_path == path || i.group_path.starts_with(&prefix))
-        .count()
+        .collect();
+    let total = matching.len();
+    let waiting = matching
+        .iter()
+        .filter(|i| i.status == Status::Waiting)
+        .count();
+    (total, waiting)
 }
 
 #[cfg(test)]
