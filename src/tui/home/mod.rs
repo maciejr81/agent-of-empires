@@ -208,6 +208,9 @@ impl HomeView {
     }
 
     pub fn reload(&mut self) -> anyhow::Result<()> {
+        // Remember currently selected session to restore after reload
+        let previously_selected = self.selected_session.clone();
+
         let (mut instances, groups) = self.storage.load_with_groups()?;
 
         for inst in &mut instances {
@@ -230,11 +233,14 @@ impl HomeView {
         self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
         self.rebuild_flat_items();
 
-        if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
+        // Try to restore selection to previously selected session
+        if let Some(session_id) = previously_selected {
+            self.select_session_by_id(&session_id);
+        } else if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
             self.cursor = self.flat_items.len() - 1;
+            self.update_selected();
         }
 
-        self.update_selected();
         Ok(())
     }
 
