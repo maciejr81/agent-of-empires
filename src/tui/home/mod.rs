@@ -240,6 +240,9 @@ impl HomeView {
 
     /// Rebuild flat_items based on current sort_mode and show_groups settings
     pub(super) fn rebuild_flat_items(&mut self) {
+        // Clear any existing filter - will be reapplied if needed
+        self.filtered_items = None;
+
         if self.show_groups {
             // With groups - use standard flatten_tree, then sort within groups if needed
             self.flat_items = flatten_tree(&self.group_tree, &self.instances);
