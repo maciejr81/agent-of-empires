@@ -5,8 +5,8 @@ use ratatui::widgets::*;
 use std::time::Instant;
 
 use super::{
-    get_indent, HomeView, ViewMode, ICON_COLLAPSED, ICON_DELETING, ICON_ERROR, ICON_EXPANDED,
-    ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_USER_ACTIVE, ICON_WAITING,
+    get_indent, HomeView, SortMode, ViewMode, ICON_COLLAPSED, ICON_DELETING, ICON_ERROR,
+    ICON_EXPANDED, ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_USER_ACTIVE, ICON_WAITING,
 };
 use crate::session::{Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
@@ -521,6 +521,36 @@ impl HomeView {
                 Span::styled("│", sep_style),
                 Span::styled(" A", key_style),
                 Span::styled(" Filter★ ", desc_style),
+            ]);
+        }
+
+        // Show sort mode indicator
+        if self.sort_mode == SortMode::RecentlyActive {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" S", key_style),
+                Span::styled(" [Recent] ", Style::default().fg(theme.accent)),
+            ]);
+        } else {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" S", key_style),
+                Span::styled(" Sort ", desc_style),
+            ]);
+        }
+
+        // Show groups toggle indicator
+        if !self.show_groups {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" o", key_style),
+                Span::styled(" [Flat] ", Style::default().fg(theme.accent)),
+            ]);
+        } else {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" o", key_style),
+                Span::styled(" Groups ", desc_style),
             ]);
         }
 
