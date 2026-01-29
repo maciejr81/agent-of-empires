@@ -267,6 +267,9 @@ impl App {
             None => return Ok(()),
         };
 
+        // Update last_accessed_at timestamp
+        self.home.update_last_accessed(session_id);
+
         let tmux_session = instance.tmux_session()?;
 
         if !tmux_session.exists() {
@@ -337,6 +340,9 @@ impl App {
             Some(inst) => inst.clone(),
             None => return Ok(()),
         };
+
+        // Update last_accessed_at timestamp
+        self.home.update_last_accessed(session_id);
 
         let terminal_session = instance.terminal_tmux_session()?;
 

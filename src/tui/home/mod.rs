@@ -32,6 +32,16 @@ pub enum ViewMode {
     Terminal,
 }
 
+/// Sort mode for session list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortMode {
+    /// Default sorting (alphabetical within groups)
+    #[default]
+    Default,
+    /// Sort by recently accessed (most recent first)
+    RecentlyActive,
+}
+
 /// Cached preview content to avoid subprocess calls on every frame
 pub(super) struct PreviewCache {
     pub(super) session_id: Option<String>,
@@ -111,6 +121,10 @@ pub struct HomeView {
     // Filter by user_active
     pub(super) filter_user_active: bool,
 
+    // Sort and display options
+    pub(super) sort_mode: SortMode,
+    pub(super) show_groups: bool,
+
     // Tool availability
     pub(super) available_tools: AvailableTools,
 
@@ -175,6 +189,8 @@ impl HomeView {
             search_query: Input::default(),
             filtered_items: None,
             filter_user_active: false,
+            sort_mode: SortMode::default(),
+            show_groups: true,
             available_tools,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
@@ -212,7 +228,7 @@ impl HomeView {
             .collect();
         self.groups = groups;
         self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances);
+        self.rebuild_flat_items();
 
         if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
             self.cursor = self.flat_items.len() - 1;
@@ -220,6 +236,97 @@ impl HomeView {
 
         self.update_selected();
         Ok(())
+    }
+
+    /// Rebuild flat_items based on current sort_mode and show_groups settings
+    pub(super) fn rebuild_flat_items(&mut self) {
+        if self.show_groups {
+            // With groups - use standard flatten_tree, then sort within groups if needed
+            self.flat_items = flatten_tree(&self.group_tree, &self.instances);
+
+            if self.sort_mode == SortMode::RecentlyActive {
+                // Sort sessions within each group by last_accessed_at (most recent first)
+                // Groups stay in their original positions, but sessions under them are reordered
+                self.sort_sessions_by_recent();
+            }
+        } else {
+            // Without groups - flat list of all sessions
+            self.flat_items = self
+                .instances
+                .iter()
+                .map(|inst| Item::Session {
+                    id: inst.id.clone(),
+                    depth: 0,
+                })
+                .collect();
+
+            if self.sort_mode == SortMode::RecentlyActive {
+                // Sort all sessions by last_accessed_at (most recent first)
+                self.flat_items.sort_by(|a, b| {
+                    let a_time = if let Item::Session { id, .. } = a {
+                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
+                    } else {
+                        None
+                    };
+                    let b_time = if let Item::Session { id, .. } = b {
+                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
+                    } else {
+                        None
+                    };
+                    // Most recent first (reverse order)
+                    b_time.cmp(&a_time)
+                });
+            }
+        }
+
+        // Reapply user_active filter if active
+        if self.filter_user_active {
+            self.update_user_active_filter();
+        }
+    }
+
+    /// Sort sessions within groups by last_accessed_at while keeping group structure
+    fn sort_sessions_by_recent(&mut self) {
+        // Find contiguous ranges of sessions (between groups) and sort them
+        let mut i = 0;
+        while i < self.flat_items.len() {
+            // Find start of session range (skip groups)
+            while i < self.flat_items.len() && matches!(self.flat_items[i], Item::Group { .. }) {
+                i += 1;
+            }
+
+            if i >= self.flat_items.len() {
+                break;
+            }
+
+            // Find end of session range
+            let start = i;
+            let current_depth = self.flat_items[i].depth();
+            while i < self.flat_items.len() {
+                match &self.flat_items[i] {
+                    Item::Session { depth, .. } if *depth == current_depth => i += 1,
+                    _ => break,
+                }
+            }
+
+            // Sort this range of sessions
+            if i > start + 1 {
+                let range = &mut self.flat_items[start..i];
+                range.sort_by(|a, b| {
+                    let a_time = if let Item::Session { id, .. } = a {
+                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
+                    } else {
+                        None
+                    };
+                    let b_time = if let Item::Session { id, .. } = b {
+                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
+                    } else {
+                        None
+                    };
+                    b_time.cmp(&a_time)
+                });
+            }
+        }
     }
 
     /// Request a status refresh in the background (non-blocking).
@@ -445,6 +552,27 @@ impl HomeView {
         }
         if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
             inst.last_error = error;
+        }
+    }
+
+    /// Update last_accessed_at timestamp for a session (called when attaching)
+    pub fn update_last_accessed(&mut self, id: &str) {
+        use chrono::Utc;
+        let now = Some(Utc::now());
+
+        if let Some(inst) = self.instance_map.get_mut(id) {
+            inst.last_accessed_at = now;
+        }
+        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
+            inst.last_accessed_at = now;
+        }
+
+        // Save to persist the timestamp
+        if let Err(e) = self
+            .storage
+            .save_with_groups(&self.instances, &self.group_tree)
+        {
+            tracing::error!("Failed to save last_accessed_at: {}", e);
         }
     }
 

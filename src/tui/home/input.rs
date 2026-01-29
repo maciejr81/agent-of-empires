@@ -5,7 +5,7 @@ use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::{HomeView, ViewMode};
-use crate::session::{flatten_tree, Item, Status};
+use crate::session::{Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, InfoDialog,
@@ -422,6 +422,24 @@ impl HomeView {
                 self.filter_user_active = !self.filter_user_active;
                 self.update_user_active_filter();
             }
+            KeyCode::Char('S') => {
+                // Shift+S: Toggle sort mode (default <-> recently active)
+                use super::SortMode;
+                self.sort_mode = match self.sort_mode {
+                    SortMode::Default => SortMode::RecentlyActive,
+                    SortMode::RecentlyActive => SortMode::Default,
+                };
+                self.rebuild_flat_items();
+                self.cursor = 0;
+                self.update_selected();
+            }
+            KeyCode::Char('o') => {
+                // Toggle show/hide groups (flat list vs grouped)
+                self.show_groups = !self.show_groups;
+                self.rebuild_flat_items();
+                self.cursor = 0;
+                self.update_selected();
+            }
             _ => {}
         }
 
@@ -474,7 +492,7 @@ impl HomeView {
 
     fn toggle_group_collapsed(&mut self, path: &str) {
         self.group_tree.toggle_collapsed(path);
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances);
+        self.rebuild_flat_items();
         if let Err(e) = self
             .storage
             .save_with_groups(&self.instances, &self.group_tree)

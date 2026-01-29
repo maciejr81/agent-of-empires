@@ -1,7 +1,7 @@
 //! Session operations for HomeView (create, delete, rename)
 
 use crate::session::builder::{self, InstanceParams};
-use crate::session::{flatten_tree, GroupTree, Status};
+use crate::session::{GroupTree, Status};
 use crate::tui::deletion_poller::DeletionRequest;
 use crate::tui::dialogs::{DeleteOptions, GroupDeleteOptions, NewSessionData};
 
@@ -130,7 +130,7 @@ impl HomeView {
             self.groups = self.group_tree.get_all_groups();
             self.storage
                 .save_with_groups(&self.instances, &self.group_tree)?;
-            self.flat_items = flatten_tree(&self.group_tree, &self.instances);
+            self.rebuild_flat_items();
         }
         Ok(())
     }
