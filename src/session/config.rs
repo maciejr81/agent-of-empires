@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -34,6 +35,9 @@ pub struct Config {
     pub session: SessionConfig,
 
     #[serde(default)]
+    pub diff: DiffConfig,
+
+    #[serde(default)]
     pub app_state: AppStateConfig,
 }
 
@@ -44,15 +48,47 @@ pub struct AppStateConfig {
 
     #[serde(default)]
     pub last_seen_version: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_list_width: Option<u16>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_file_list_width: Option<u16>,
 }
 
 /// Session-related configuration defaults
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionConfig {
-    /// Default coding tool for new sessions (claude, opencode, codex)
+    /// Default coding tool for new sessions (claude, opencode, vibe, codex)
     /// If not set or tool is unavailable, falls back to first available tool
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_tool: Option<String>,
+}
+
+/// Diff view configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffConfig {
+    /// Default branch to compare against (e.g., "main", "master")
+    /// If not set, will try to auto-detect from the repository
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+
+    /// Number of context lines to show around changes
+    #[serde(default = "default_context_lines")]
+    pub context_lines: usize,
+}
+
+impl Default for DiffConfig {
+    fn default() -> Self {
+        Self {
+            default_branch: None,
+            context_lines: 3,
+        }
+    }
+}
+
+fn default_context_lines() -> usize {
+    3
 }
 
 fn default_profile() -> String {
@@ -123,6 +159,11 @@ pub struct WorktreeConfig {
 
     #[serde(default = "default_true")]
     pub show_branch_in_tui: bool,
+
+    /// When deleting a worktree, also delete the associated git branch.
+    /// Default: false (unchecked in delete dialog)
+    #[serde(default)]
+    pub delete_branch_on_cleanup: bool,
 }
 
 impl Default for WorktreeConfig {
@@ -133,6 +174,7 @@ impl Default for WorktreeConfig {
             bare_repo_path_template: default_bare_repo_template(),
             auto_cleanup: true,
             show_branch_in_tui: true,
+            delete_branch_on_cleanup: false,
         }
     }
 }
@@ -160,8 +202,14 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub extra_volumes: Vec<String>,
 
-    #[serde(default)]
+    #[serde(default = "default_sandbox_environment")]
     pub environment: Vec<String>,
+
+    /// Environment variables with explicit values to inject into sandbox containers.
+    /// Unlike `environment` (which passes through host values), these are stored in config
+    /// and injected directly. Useful for sandbox-specific credentials like GH_TOKEN.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub environment_values: HashMap<String, String>,
 
     #[serde(default = "default_true")]
     pub auto_cleanup: bool,
@@ -171,6 +219,14 @@ pub struct SandboxConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_limit: Option<String>,
+
+    /// Default terminal mode for sandboxed sessions (host or container)
+    #[serde(default)]
+    pub default_terminal_mode: DefaultTerminalMode,
+
+    /// Relative directory paths to exclude from the host bind mount via anonymous volumes
+    #[serde(default)]
+    pub volume_ignores: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -180,16 +236,39 @@ impl Default for SandboxConfig {
             yolo_mode_default: false,
             default_image: default_sandbox_image(),
             extra_volumes: Vec::new(),
-            environment: Vec::new(),
+            environment: default_sandbox_environment(),
+            environment_values: HashMap::new(),
             auto_cleanup: true,
             cpu_limit: None,
             memory_limit: None,
+            default_terminal_mode: DefaultTerminalMode::default(),
+            volume_ignores: Vec::new(),
         }
     }
 }
 
 fn default_sandbox_image() -> String {
     crate::docker::default_sandbox_image().to_string()
+}
+
+fn default_sandbox_environment() -> Vec<String> {
+    vec![
+        "TERM".to_string(),
+        "COLORTERM".to_string(),
+        "FORCE_COLOR".to_string(),
+        "NO_COLOR".to_string(),
+    ]
+}
+
+/// Default terminal mode for sandboxed sessions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultTerminalMode {
+    /// Default to host terminal (shell on the host machine)
+    #[default]
+    Host,
+    /// Default to container terminal (shell inside the Docker container)
+    Container,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -293,10 +372,7 @@ pub fn load_config() -> Result<Option<Config>> {
     if !path.exists() {
         return Ok(None);
     }
-
-    let content = fs::read_to_string(&path)?;
-    let config: Config = toml::from_str(&content)?;
-    Ok(Some(config))
+    Ok(Some(Config::load()?))
 }
 
 pub fn save_config(config: &Config) -> Result<()> {
@@ -441,9 +517,11 @@ mod tests {
         assert!(!sb.enabled_by_default);
         assert!(sb.auto_cleanup);
         assert!(sb.extra_volumes.is_empty());
-        assert!(sb.environment.is_empty());
+        assert!(sb.environment.contains(&"TERM".to_string()));
+        assert!(sb.environment.contains(&"COLORTERM".to_string()));
         assert!(sb.cpu_limit.is_none());
         assert!(sb.memory_limit.is_none());
+        assert!(sb.volume_ignores.is_empty());
     }
 
     #[test]
@@ -465,6 +543,36 @@ mod tests {
         assert!(!sb.auto_cleanup);
         assert_eq!(sb.cpu_limit, Some("2".to_string()));
         assert_eq!(sb.memory_limit, Some("4g".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_config_volume_ignores_deserialize() {
+        let toml = r#"
+            volume_ignores = ["target", ".venv", "node_modules"]
+        "#;
+        let sb: SandboxConfig = toml::from_str(toml).unwrap();
+        assert_eq!(sb.volume_ignores, vec!["target", ".venv", "node_modules"]);
+    }
+
+    #[test]
+    fn test_sandbox_config_volume_ignores_defaults_empty() {
+        let toml = r#"enabled_by_default = false"#;
+        let sb: SandboxConfig = toml::from_str(toml).unwrap();
+        assert!(sb.volume_ignores.is_empty());
+    }
+
+    #[test]
+    fn test_sandbox_config_volume_ignores_roundtrip() {
+        let mut config = Config::default();
+        config.sandbox.volume_ignores = vec!["target".to_string(), "node_modules".to_string()];
+
+        let serialized = toml::to_string(&config).unwrap();
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            deserialized.sandbox.volume_ignores,
+            vec!["target", "node_modules"]
+        );
     }
 
     // Tests for ClaudeConfig
@@ -684,5 +792,44 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.tmux.status_bar, TmuxStatusBarMode::Enabled);
         assert_eq!(config.tmux.mouse, TmuxMouseMode::Enabled);
+    }
+
+    // Tests for DiffConfig
+    #[test]
+    fn test_diff_config_default() {
+        let diff = DiffConfig::default();
+        assert!(diff.default_branch.is_none());
+        assert_eq!(diff.context_lines, 3);
+    }
+
+    #[test]
+    fn test_diff_config_deserialize() {
+        let toml = r#"
+            default_branch = "main"
+            context_lines = 5
+        "#;
+        let diff: DiffConfig = toml::from_str(toml).unwrap();
+        assert_eq!(diff.default_branch, Some("main".to_string()));
+        assert_eq!(diff.context_lines, 5);
+    }
+
+    #[test]
+    fn test_diff_config_partial_deserialize() {
+        let toml = r#"default_branch = "develop""#;
+        let diff: DiffConfig = toml::from_str(toml).unwrap();
+        assert_eq!(diff.default_branch, Some("develop".to_string()));
+        assert_eq!(diff.context_lines, 3);
+    }
+
+    #[test]
+    fn test_diff_config_in_full_config() {
+        let toml = r#"
+            [diff]
+            default_branch = "main"
+            context_lines = 10
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.diff.default_branch, Some("main".to_string()));
+        assert_eq!(config.diff.context_lines, 10);
     }
 }

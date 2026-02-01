@@ -209,20 +209,14 @@ pub fn flatten_tree(group_tree: &GroupTree, instances: &[Instance]) -> Vec<Item>
 
     // Add groups and their sessions
     for root in group_tree.get_roots() {
-        flatten_group(root, instances, &mut items, 0, group_tree);
+        flatten_group(root, instances, &mut items, 0);
     }
 
     items
 }
 
-fn flatten_group(
-    group: &Group,
-    instances: &[Instance],
-    items: &mut Vec<Item>,
-    depth: usize,
-    tree: &GroupTree,
-) {
-    let (session_count, waiting_count) = count_sessions_in_group(&group.path, instances, tree);
+fn flatten_group(group: &Group, instances: &[Instance], items: &mut Vec<Item>, depth: usize) {
+    let (session_count, waiting_count) = count_sessions_in_group(&group.path, instances);
 
     items.push(Item::Group {
         path: group.path.clone(),
@@ -252,15 +246,11 @@ fn flatten_group(
 
     // Recursively add child groups
     for child in &group.children {
-        flatten_group(child, instances, items, depth + 1, tree);
+        flatten_group(child, instances, items, depth + 1);
     }
 }
 
-fn count_sessions_in_group(
-    path: &str,
-    instances: &[Instance],
-    _tree: &GroupTree,
-) -> (usize, usize) {
+fn count_sessions_in_group(path: &str, instances: &[Instance]) -> (usize, usize) {
     use super::Status;
     let prefix = format!("{}/", path);
     let matching: Vec<_> = instances
@@ -312,7 +302,7 @@ mod tests {
         assert!(!items.is_empty());
 
         // First item should be ungrouped session
-        matches!(items[0], Item::Session { .. });
+        assert!(matches!(items[0], Item::Session { .. }));
     }
 
     #[test]

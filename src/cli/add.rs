@@ -2,9 +2,10 @@
 
 use anyhow::{bail, Result};
 use clap::Args;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::docker::{self, DockerContainer};
+use crate::session::repo_config;
 use crate::session::{civilizations, Config, GroupTree, Instance, SandboxInfo, Storage};
 
 #[derive(Args)]
@@ -21,7 +22,7 @@ pub struct AddArgs {
     #[arg(short = 'g', long)]
     group: Option<String>,
 
-    /// Command to run (e.g., 'claude', 'opencode', 'codex')
+    /// Command to run (e.g., 'claude', 'opencode', 'vibe', 'codex', 'gemini')
     #[arg(short = 'c', long = "cmd")]
     command: Option<String>,
 
@@ -48,6 +49,10 @@ pub struct AddArgs {
     /// Custom Docker image for sandbox (implies --sandbox)
     #[arg(long = "sandbox-image")]
     sandbox_image: Option<String>,
+
+    /// Automatically trust repository hooks without prompting
+    #[arg(long = "trust-hooks")]
+    trust_hooks: bool,
 }
 
 pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
@@ -83,7 +88,8 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         let session_id_short = &session_id[..8];
 
         // Choose appropriate template based on repo type (bare vs regular)
-        let template = if GitWorktree::is_bare_repo(&path) {
+        // Use main_repo_path (not path) to correctly detect bare repos when running from a worktree
+        let template = if GitWorktree::is_bare_repo(&main_repo_path) {
             &config.worktree.bare_repo_path_template
         } else {
             &config.worktree.path_template
@@ -158,7 +164,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
 
     if let Some(cmd) = &args.command {
         instance.command = cmd.clone();
-        instance.tool = detect_tool(cmd);
+        instance.tool = detect_tool(cmd)?;
     }
 
     if let Some(worktree_info) = worktree_info_opt {
@@ -192,8 +198,73 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                 container_name,
                 created_at: None,
                 yolo_mode: None,
+                extra_env_keys: None,
+                extra_env_values: None,
             });
         }
+    }
+
+    // Check for repository hooks
+    let hook_result: Result<()> = (|| {
+        match repo_config::check_hook_trust(&path) {
+            Ok(repo_config::HookTrustStatus::NeedsTrust { hooks, hooks_hash }) => {
+                let should_trust = if args.trust_hooks {
+                    true
+                } else {
+                    println!("\nRepository hooks detected in .aoe/config.toml:");
+                    if !hooks.on_create.is_empty() {
+                        println!("  on_create:");
+                        for cmd in &hooks.on_create {
+                            println!("    {}", cmd);
+                        }
+                    }
+                    if !hooks.on_launch.is_empty() {
+                        println!("  on_launch:");
+                        for cmd in &hooks.on_launch {
+                            println!("    {}", cmd);
+                        }
+                    }
+                    print!("\nTrust and run these hooks? [y/N] ");
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    input.trim().eq_ignore_ascii_case("y")
+                };
+
+                if should_trust {
+                    trust_and_run_on_create(&path, &hooks_hash, &hooks)?;
+                } else {
+                    println!("Hooks skipped (session created without running hooks)");
+                }
+            }
+            Ok(repo_config::HookTrustStatus::Trusted(hooks)) => {
+                if !hooks.on_create.is_empty() {
+                    println!("Running on_create hooks...");
+                    repo_config::execute_hooks(&hooks.on_create, &path)?;
+                    println!("✓ on_create hooks completed");
+                }
+            }
+            Ok(repo_config::HookTrustStatus::NoHooks) => {}
+            Err(e) => {
+                tracing::warn!("Failed to check repo hooks: {}", e);
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = hook_result {
+        // Clean up worktree if we created one
+        if let Some(ref wt_info) = instance.worktree_info {
+            if wt_info.managed_by_aoe {
+                if let Ok(git_wt) =
+                    crate::git::GitWorktree::new(std::path::PathBuf::from(&wt_info.main_repo_path))
+                {
+                    let _ = git_wt.remove_worktree(&path);
+                }
+            }
+        }
+        return Err(e);
     }
 
     instances.push(instance.clone());
@@ -252,38 +323,39 @@ pub fn is_duplicate_session(instances: &[Instance], title: &str, path: &str) -> 
     })
 }
 
-pub fn generate_unique_title(instances: &[Instance], base_title: &str, path: &str) -> String {
-    let title_exists = |title: &str| -> bool {
-        instances
-            .iter()
-            .any(|inst| inst.project_path == path && inst.title == title)
-    };
-
-    if !title_exists(base_title) {
-        return base_title.to_string();
+fn trust_and_run_on_create(
+    project_path: &Path,
+    hooks_hash: &str,
+    hooks: &crate::session::HooksConfig,
+) -> Result<()> {
+    repo_config::trust_repo(project_path, hooks_hash)?;
+    println!("✓ Repository hooks trusted");
+    if !hooks.on_create.is_empty() {
+        println!("Running on_create hooks...");
+        repo_config::execute_hooks(&hooks.on_create, project_path)?;
+        println!("✓ on_create hooks completed");
     }
-
-    for i in 2..=100 {
-        let candidate = format!("{} ({})", base_title, i);
-        if !title_exists(&candidate) {
-            return candidate;
-        }
-    }
-
-    format!("{} ({})", base_title, chrono::Utc::now().timestamp())
+    Ok(())
 }
 
-fn detect_tool(cmd: &str) -> String {
+fn detect_tool(cmd: &str) -> Result<String> {
     let cmd_lower = cmd.to_lowercase();
     if cmd_lower.is_empty() || cmd_lower.contains("claude") {
-        "claude".to_string()
+        Ok("claude".to_string())
     } else if cmd_lower.contains("opencode") || cmd_lower.contains("open-code") {
-        "opencode".to_string()
+        Ok("opencode".to_string())
+    } else if cmd_lower.contains("vibe") || cmd_lower.contains("mistral-vibe") {
+        Ok("vibe".to_string())
     } else if cmd_lower.contains("codex") {
-        "codex".to_string()
-    } else if cmd_lower.contains("cursor") {
-        "cursor".to_string()
+        Ok("codex".to_string())
+    } else if cmd_lower.contains("gemini") {
+        Ok("gemini".to_string())
     } else {
-        "shell".to_string()
+        bail!(
+            "Unknown tool in command: {}\n\
+             Supported tools: claude, opencode, vibe, codex, gemini\n\
+             Tip: Command must contain one of the supported tool names",
+            cmd
+        )
     }
 }

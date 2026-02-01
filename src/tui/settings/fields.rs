@@ -1,7 +1,10 @@
 //! Setting field definitions and config mapping
 
+use std::collections::HashMap;
+
 use crate::session::{
-    validate_check_interval, Config, ProfileConfig, TmuxMouseMode, TmuxStatusBarMode,
+    validate_check_interval, Config, DefaultTerminalMode, ProfileConfig, TmuxMouseMode,
+    TmuxStatusBarMode,
 };
 
 use super::SettingsScope;
@@ -39,12 +42,16 @@ pub enum FieldKey {
     PathTemplate,
     BareRepoPathTemplate,
     WorktreeAutoCleanup,
+    DeleteBranchOnCleanup,
     // Sandbox
     SandboxEnabledByDefault,
     YoloModeDefault,
     DefaultImage,
     Environment,
+    EnvironmentValues,
     SandboxAutoCleanup,
+    DefaultTerminalMode,
+    VolumeIgnores,
     // Tmux
     StatusBar,
     Mouse,
@@ -230,6 +237,11 @@ fn build_worktree_fields(
         global.worktree.auto_cleanup,
         wt.and_then(|w| w.auto_cleanup),
     );
+    let (delete_branch_on_cleanup, o4) = resolve_value(
+        scope,
+        global.worktree.delete_branch_on_cleanup,
+        wt.and_then(|w| w.delete_branch_on_cleanup),
+    );
 
     vec![
         SettingField {
@@ -255,6 +267,14 @@ fn build_worktree_fields(
             value: FieldValue::Bool(auto_cleanup),
             category: SettingsCategory::Worktree,
             has_override: o3,
+        },
+        SettingField {
+            key: FieldKey::DeleteBranchOnCleanup,
+            label: "Delete Branch on Cleanup",
+            description: "Also delete the git branch when deleting a worktree",
+            value: FieldValue::Bool(delete_branch_on_cleanup),
+            category: SettingsCategory::Worktree,
+            has_override: o4,
         },
     ]
 }
@@ -286,11 +306,39 @@ fn build_sandbox_fields(
         global.sandbox.environment.clone(),
         sb.and_then(|s| s.environment.clone()),
     );
+    let (environment_values, o_env_vals) = resolve_value(
+        scope,
+        global.sandbox.environment_values.clone(),
+        sb.and_then(|s| s.environment_values.clone()),
+    );
+    let env_values_list = {
+        let mut entries: Vec<String> = environment_values
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        entries.sort();
+        entries
+    };
     let (auto_cleanup, o5) = resolve_value(
         scope,
         global.sandbox.auto_cleanup,
         sb.and_then(|s| s.auto_cleanup),
     );
+    let (default_terminal_mode, o6) = resolve_value(
+        scope,
+        global.sandbox.default_terminal_mode,
+        sb.and_then(|s| s.default_terminal_mode),
+    );
+    let (volume_ignores, o7) = resolve_value(
+        scope,
+        global.sandbox.volume_ignores.clone(),
+        sb.and_then(|s| s.volume_ignores.clone()),
+    );
+
+    let terminal_mode_selected = match default_terminal_mode {
+        DefaultTerminalMode::Host => 0,
+        DefaultTerminalMode::Container => 1,
+    };
 
     vec![
         SettingField {
@@ -320,10 +368,18 @@ fn build_sandbox_fields(
         SettingField {
             key: FieldKey::Environment,
             label: "Environment Variables",
-            description: "Environment variables to pass to container",
+            description: "Var names to pass through from host (e.g. GITHUB_TOKEN)",
             value: FieldValue::List(environment),
             category: SettingsCategory::Sandbox,
             has_override: o4,
+        },
+        SettingField {
+            key: FieldKey::EnvironmentValues,
+            label: "Environment Values",
+            description: "Custom KEY=VALUE env vars for sandbox. Use $VAR to reference host vars",
+            value: FieldValue::List(env_values_list),
+            category: SettingsCategory::Sandbox,
+            has_override: o_env_vals,
         },
         SettingField {
             key: FieldKey::SandboxAutoCleanup,
@@ -332,6 +388,25 @@ fn build_sandbox_fields(
             value: FieldValue::Bool(auto_cleanup),
             category: SettingsCategory::Sandbox,
             has_override: o5,
+        },
+        SettingField {
+            key: FieldKey::DefaultTerminalMode,
+            label: "Default Terminal Mode",
+            description: "Default terminal for sandboxed sessions (toggle with 'c' key)",
+            value: FieldValue::Select {
+                selected: terminal_mode_selected,
+                options: vec!["Host".into(), "Container".into()],
+            },
+            category: SettingsCategory::Sandbox,
+            has_override: o6,
+        },
+        SettingField {
+            key: FieldKey::VolumeIgnores,
+            label: "Volume Ignores",
+            description: "Directories to exclude from host mount (e.g. target, node_modules)",
+            value: FieldValue::List(volume_ignores),
+            category: SettingsCategory::Sandbox,
+            has_override: o7,
         },
     ]
 }
@@ -404,11 +479,13 @@ fn build_session_fields(
         session.map(|s| s.default_tool.is_some()).unwrap_or(false),
     );
 
-    // Map tool name to selected index: 0=Auto (first available), 1=claude, 2=opencode, 3=codex
+    // Map tool name to selected index: 0=Auto, 1=claude, 2=opencode, 3=vibe, 4=codex, 5=gemini
     let selected = match default_tool.as_deref() {
         Some("claude") => 1,
         Some("opencode") => 2,
-        Some("codex") => 3,
+        Some("vibe") => 3,
+        Some("codex") => 4,
+        Some("gemini") => 5,
         _ => 0, // Auto (use first available)
     };
 
@@ -422,7 +499,9 @@ fn build_session_fields(
                 "Auto (first available)".into(),
                 "claude".into(),
                 "opencode".into(),
+                "vibe".into(),
                 "codex".into(),
+                "gemini".into(),
             ],
         },
         category: SettingsCategory::Session,
@@ -458,6 +537,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
             config.worktree.bare_repo_path_template = v.clone()
         }
         (FieldKey::WorktreeAutoCleanup, FieldValue::Bool(v)) => config.worktree.auto_cleanup = *v,
+        (FieldKey::DeleteBranchOnCleanup, FieldValue::Bool(v)) => {
+            config.worktree.delete_branch_on_cleanup = *v
+        }
         // Sandbox
         (FieldKey::SandboxEnabledByDefault, FieldValue::Bool(v)) => {
             config.sandbox.enabled_by_default = *v
@@ -465,7 +547,17 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::YoloModeDefault, FieldValue::Bool(v)) => config.sandbox.yolo_mode_default = *v,
         (FieldKey::DefaultImage, FieldValue::Text(v)) => config.sandbox.default_image = v.clone(),
         (FieldKey::Environment, FieldValue::List(v)) => config.sandbox.environment = v.clone(),
+        (FieldKey::EnvironmentValues, FieldValue::List(v)) => {
+            config.sandbox.environment_values = parse_env_values_list(v);
+        }
+        (FieldKey::VolumeIgnores, FieldValue::List(v)) => config.sandbox.volume_ignores = v.clone(),
         (FieldKey::SandboxAutoCleanup, FieldValue::Bool(v)) => config.sandbox.auto_cleanup = *v,
+        (FieldKey::DefaultTerminalMode, FieldValue::Select { selected, .. }) => {
+            config.sandbox.default_terminal_mode = match selected {
+                0 => DefaultTerminalMode::Host,
+                _ => DefaultTerminalMode::Container,
+            };
+        }
         // Tmux
         (FieldKey::StatusBar, FieldValue::Select { selected, .. }) => {
             config.tmux.status_bar = match selected {
@@ -486,7 +578,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
             config.session.default_tool = match selected {
                 1 => Some("claude".to_string()),
                 2 => Some("opencode".to_string()),
-                3 => Some("codex".to_string()),
+                3 => Some("vibe".to_string()),
+                4 => Some("codex".to_string()),
+                5 => Some("gemini".to_string()),
                 _ => None, // Auto
             };
         }
@@ -548,6 +642,14 @@ fn apply_field_to_profile(field: &SettingField, global: &Config, config: &mut Pr
                 |s, val| s.auto_cleanup = val,
             );
         }
+        (FieldKey::DeleteBranchOnCleanup, FieldValue::Bool(v)) => {
+            set_or_clear_override(
+                *v,
+                &global.worktree.delete_branch_on_cleanup,
+                &mut config.worktree,
+                |s, val| s.delete_branch_on_cleanup = val,
+            );
+        }
         // Sandbox
         (FieldKey::SandboxEnabledByDefault, FieldValue::Bool(v)) => {
             set_or_clear_override(
@@ -581,12 +683,41 @@ fn apply_field_to_profile(field: &SettingField, global: &Config, config: &mut Pr
                 |s, val| s.environment = val,
             );
         }
+        (FieldKey::EnvironmentValues, FieldValue::List(v)) => {
+            let map = parse_env_values_list(v);
+            set_or_clear_override(
+                map,
+                &global.sandbox.environment_values,
+                &mut config.sandbox,
+                |s, val| s.environment_values = val,
+            );
+        }
+        (FieldKey::VolumeIgnores, FieldValue::List(v)) => {
+            set_or_clear_override(
+                v.clone(),
+                &global.sandbox.volume_ignores,
+                &mut config.sandbox,
+                |s, val| s.volume_ignores = val,
+            );
+        }
         (FieldKey::SandboxAutoCleanup, FieldValue::Bool(v)) => {
             set_or_clear_override(
                 *v,
                 &global.sandbox.auto_cleanup,
                 &mut config.sandbox,
                 |s, val| s.auto_cleanup = val,
+            );
+        }
+        (FieldKey::DefaultTerminalMode, FieldValue::Select { selected, .. }) => {
+            let mode = match selected {
+                0 => DefaultTerminalMode::Host,
+                _ => DefaultTerminalMode::Container,
+            };
+            set_or_clear_override(
+                mode,
+                &global.sandbox.default_terminal_mode,
+                &mut config.sandbox,
+                |s, val| s.default_terminal_mode = val,
             );
         }
         // Tmux
@@ -615,7 +746,9 @@ fn apply_field_to_profile(field: &SettingField, global: &Config, config: &mut Pr
             let tool = match selected {
                 1 => Some("claude".to_string()),
                 2 => Some("opencode".to_string()),
-                3 => Some("codex".to_string()),
+                3 => Some("vibe".to_string()),
+                4 => Some("codex".to_string()),
+                5 => Some("gemini".to_string()),
                 _ => None, // Auto
             };
             // Compare with global and set/clear override accordingly
@@ -633,6 +766,25 @@ fn apply_field_to_profile(field: &SettingField, global: &Config, config: &mut Pr
         }
         _ => {}
     }
+}
+
+/// Parse a list of "KEY=VALUE" strings into a HashMap.
+/// Entries without '=' are logged and skipped.
+fn parse_env_values_list(entries: &[String]) -> HashMap<String, String> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            if let Some((key, value)) = entry.split_once('=') {
+                Some((key.to_string(), value.to_string()))
+            } else {
+                tracing::warn!(
+                    "Ignoring malformed environment value (missing '='): {}",
+                    entry
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -723,5 +875,54 @@ mod tests {
             check_enabled_field.has_override,
             "Profile SHOULD show override after explicit profile change"
         );
+    }
+
+    #[test]
+    fn test_default_tool_options_include_all_supported_tools() {
+        use crate::session::SUPPORTED_TOOLS;
+
+        let global = Config::default();
+        let profile = ProfileConfig::default();
+
+        let fields = build_fields_for_category(
+            SettingsCategory::Session,
+            SettingsScope::Global,
+            &global,
+            &profile,
+        );
+
+        let tool_field = fields
+            .iter()
+            .find(|f| f.key == FieldKey::DefaultTool)
+            .expect("DefaultTool field should exist");
+
+        let options = match &tool_field.value {
+            FieldValue::Select { options, .. } => options,
+            _ => panic!("DefaultTool should be a Select field"),
+        };
+
+        // First option is "Auto (first available)", rest should be tool names
+        let tool_options: Vec<&str> = options.iter().skip(1).map(|s| s.as_str()).collect();
+
+        for tool in SUPPORTED_TOOLS {
+            assert!(
+                tool_options.contains(tool),
+                "Settings UI missing tool '{}'. Update default_tool_fields() in fields.rs \
+                 when adding new tools. Supported tools: {:?}, UI options: {:?}",
+                tool,
+                SUPPORTED_TOOLS,
+                tool_options
+            );
+        }
+
+        // Also verify we don't have extra unknown tools in the UI
+        for option in &tool_options {
+            assert!(
+                SUPPORTED_TOOLS.contains(option),
+                "Settings UI has unknown tool '{}' not in SUPPORTED_TOOLS. \
+                 Either add to SUPPORTED_TOOLS or remove from UI.",
+                option
+            );
+        }
     }
 }

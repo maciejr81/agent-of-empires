@@ -7,12 +7,116 @@ use uuid::Uuid;
 
 use crate::docker::{
     self, ContainerConfig, DockerContainer, VolumeMount, CLAUDE_AUTH_VOLUME, CODEX_AUTH_VOLUME,
-    OPENCODE_AUTH_VOLUME,
+    GEMINI_AUTH_VOLUME, OPENCODE_AUTH_VOLUME, VIBE_AUTH_VOLUME,
 };
+use crate::git::GitWorktree;
 use crate::tmux;
 
 fn default_true() -> bool {
     true
+}
+
+/// Terminal environment variables that are always passed through for proper UI/theming
+const DEFAULT_TERMINAL_ENV_VARS: &[&str] = &["TERM", "COLORTERM", "FORCE_COLOR", "NO_COLOR"];
+
+/// Shell-escape a value for safe interpolation into a shell command string.
+/// Uses double-quote escaping so values can be nested inside `bash -c '...'`
+/// (single quotes in the outer wrapper are literal, double quotes work inside).
+fn shell_escape(val: &str) -> String {
+    let escaped = val
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
+    format!("\"{}\"", escaped)
+}
+
+/// Resolve an environment_values entry. If the value starts with `$`, read the
+/// named variable from the host environment (use `$$` to escape a literal `$`).
+/// Otherwise return the literal value.
+fn resolve_env_value(val: &str) -> Option<String> {
+    if let Some(rest) = val.strip_prefix("$$") {
+        Some(format!("${}", rest))
+    } else if let Some(var_name) = val.strip_prefix('$') {
+        std::env::var(var_name).ok()
+    } else {
+        Some(val.to_string())
+    }
+}
+
+/// Collect all environment variable keys from defaults, global config, and per-session extras.
+fn collect_env_keys(
+    sandbox_config: &super::config::SandboxConfig,
+    sandbox_info: &SandboxInfo,
+) -> Vec<String> {
+    let mut env_keys: Vec<String> = DEFAULT_TERMINAL_ENV_VARS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    for key in &sandbox_config.environment {
+        if !env_keys.contains(key) {
+            env_keys.push(key.clone());
+        }
+    }
+
+    if let Some(extra_keys) = &sandbox_info.extra_env_keys {
+        for key in extra_keys {
+            if !env_keys.contains(key) {
+                env_keys.push(key.clone());
+            }
+        }
+    }
+
+    env_keys
+}
+
+/// Collect all key=value environment pairs from global config and per-session extras.
+fn collect_env_values(
+    sandbox_config: &super::config::SandboxConfig,
+    sandbox_info: &SandboxInfo,
+) -> Vec<(String, String)> {
+    let mut values = Vec::new();
+
+    for (key, val) in &sandbox_config.environment_values {
+        if let Some(resolved) = resolve_env_value(val) {
+            values.push((key.clone(), resolved));
+        }
+    }
+
+    if let Some(extra_vals) = &sandbox_info.extra_env_values {
+        for (key, val) in extra_vals {
+            if let Some(resolved) = resolve_env_value(val) {
+                values.push((key.clone(), resolved));
+            }
+        }
+    }
+
+    values
+}
+
+/// Build docker exec environment flags from config and optional per-session extra keys.
+/// Used for `docker exec` commands (shell string interpolation, hence shell-escaping).
+/// Container creation uses `ContainerConfig.environment` (separate args, no escaping needed).
+fn build_docker_env_args(sandbox: &SandboxInfo) -> String {
+    let config = super::config::Config::load().unwrap_or_default();
+
+    let env_keys = collect_env_keys(&config.sandbox, sandbox);
+
+    let mut args: Vec<String> = env_keys
+        .iter()
+        .filter_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|val| format!("-e {}={}", key, shell_escape(&val)))
+        })
+        .collect();
+
+    for (key, resolved) in collect_env_values(&config.sandbox, sandbox) {
+        args.push(format!("-e {}={}", key, shell_escape(&resolved)));
+    }
+
+    args.join(" ")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +160,12 @@ pub struct SandboxInfo {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo_mode: Option<bool>,
+    /// Additional environment variable keys to pass from host (session-specific)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env_keys: Option<Vec<String>>,
+    /// Additional KEY=VALUE environment variables (session-specific overrides)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env_values: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,12 +186,6 @@ pub struct Instance {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_accessed_at: Option<DateTime<Utc>>,
-
-    // Claude Code integration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_detected_at: Option<DateTime<Utc>>,
 
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,8 +233,6 @@ impl Instance {
             status: Status::Idle,
             created_at: Utc::now(),
             last_accessed_at: None,
-            claude_session_id: None,
-            claude_detected_at: None,
             worktree_info: None,
             sandbox_info: None,
             terminal_info: None,
@@ -169,7 +271,9 @@ impl Instance {
             match self.tool.as_str() {
                 "claude" => "claude",
                 "opencode" => "opencode",
+                "vibe" => "vibe",
                 "codex" => "codex",
+                "gemini" => "gemini",
                 _ => "bash",
             }
         } else {
@@ -201,7 +305,7 @@ impl Instance {
 
         let is_new = !session.exists();
         if is_new {
-            session.create_with_size(&self.project_path, size)?;
+            session.create_with_size(&self.project_path, None, size)?;
         }
 
         // Apply all configured tmux options to terminal sessions too
@@ -225,41 +329,182 @@ impl Instance {
         Ok(())
     }
 
+    pub fn container_terminal_tmux_session(&self) -> Result<tmux::ContainerTerminalSession> {
+        tmux::ContainerTerminalSession::new(&self.id, &self.title)
+    }
+
+    pub fn has_container_terminal(&self) -> bool {
+        self.container_terminal_tmux_session()
+            .map(|s| s.exists())
+            .unwrap_or(false)
+    }
+
+    pub fn start_container_terminal_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
+        if !self.is_sandboxed() {
+            anyhow::bail!("Cannot create container terminal for non-sandboxed session");
+        }
+
+        self.ensure_container_running()?;
+        let sandbox = self.sandbox_info.as_ref().unwrap();
+
+        let env_args = build_docker_env_args(sandbox);
+        let env_part = if env_args.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", env_args)
+        };
+
+        // Get workspace path inside container (handles bare repo worktrees correctly)
+        let project_path = std::path::Path::new(&self.project_path);
+        let (_, _, container_workdir) = self.compute_volume_paths(project_path)?;
+
+        let cmd = format!(
+            "docker exec -it -w {} {}{} /bin/bash",
+            container_workdir, env_part, sandbox.container_name
+        );
+
+        let session = self.container_terminal_tmux_session()?;
+        let is_new = !session.exists();
+        if is_new {
+            session.create_with_size(&self.project_path, Some(&cmd), size)?;
+            self.apply_container_terminal_tmux_options();
+        }
+
+        Ok(())
+    }
+
+    pub fn kill_container_terminal(&self) -> Result<()> {
+        let session = self.container_terminal_tmux_session()?;
+        if session.exists() {
+            session.kill()?;
+        }
+        Ok(())
+    }
+
+    fn sandbox_display(&self) -> Option<crate::tmux::status_bar::SandboxDisplay> {
+        self.sandbox_info.as_ref().and_then(|s| {
+            if s.enabled {
+                Some(crate::tmux::status_bar::SandboxDisplay {
+                    container_name: s.container_name.clone(),
+                })
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Apply all configured tmux options to the container terminal session.
+    fn apply_container_terminal_tmux_options(&self) {
+        let session_name = tmux::ContainerTerminalSession::generate_name(&self.id, &self.title);
+        let terminal_title = format!("{} (container)", self.title);
+        let branch = self.worktree_info.as_ref().map(|w| w.branch.as_str());
+        let sandbox = self.sandbox_display();
+
+        crate::tmux::status_bar::apply_all_tmux_options(
+            &session_name,
+            &terminal_title,
+            branch,
+            sandbox.as_ref(),
+        );
+    }
+
     pub fn start(&mut self) -> Result<()> {
         self.start_with_size(None)
     }
 
     pub fn start_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
+        self.start_with_size_opts(size, false)
+    }
+
+    /// Start the session, optionally skipping on_launch hooks (e.g. when they
+    /// already ran in the background creation poller).
+    pub fn start_with_size_opts(
+        &mut self,
+        size: Option<(u16, u16)>,
+        skip_on_launch: bool,
+    ) -> Result<()> {
         let session = self.tmux_session()?;
 
         if session.exists() {
             return Ok(());
         }
 
+        // Execute on_launch hooks (trust already verified during creation).
+        // Use check_hook_trust which normalizes the path, so symlinked
+        // project_paths resolve correctly against the trust store.
+        let on_launch_hooks = if skip_on_launch {
+            None
+        } else {
+            match super::repo_config::check_hook_trust(std::path::Path::new(&self.project_path)) {
+                Ok(super::repo_config::HookTrustStatus::Trusted(hooks))
+                    if !hooks.on_launch.is_empty() =>
+                {
+                    Some(hooks.on_launch.clone())
+                }
+                _ => None,
+            }
+        };
+
         let cmd = if self.is_sandboxed() {
             self.ensure_container_running()?;
+
+            // Run on_launch hooks inside the container
+            if let Some(ref hook_cmds) = on_launch_hooks {
+                if let Some(ref sandbox) = self.sandbox_info {
+                    let workdir = self.container_workdir();
+                    if let Err(e) = super::repo_config::execute_hooks_in_container(
+                        hook_cmds,
+                        &sandbox.container_name,
+                        &workdir,
+                    ) {
+                        tracing::warn!("on_launch hook failed in container: {}", e);
+                    }
+                }
+            }
             let sandbox = self.sandbox_info.as_ref().unwrap();
             let tool_cmd = if self.is_yolo_mode() {
                 match self.tool.as_str() {
                     "claude" => "claude --dangerously-skip-permissions".to_string(),
+                    "vibe" => "vibe --agent auto-approve".to_string(),
                     "codex" => "codex --dangerously-bypass-approvals-and-sandbox".to_string(),
+                    "gemini" => "gemini --approval-mode yolo".to_string(),
                     _ => self.get_tool_command().to_string(),
                 }
             } else {
                 self.get_tool_command().to_string()
             };
+            let env_args = build_docker_env_args(sandbox);
+            let env_part = if env_args.is_empty() {
+                String::new()
+            } else {
+                format!("{} ", env_args)
+            };
             Some(wrap_command_ignore_suspend(&format!(
-                "docker exec -it {} {}",
-                sandbox.container_name, tool_cmd
+                "docker exec -it {}{} {}",
+                env_part, sandbox.container_name, tool_cmd
             )))
-        } else if self.command.is_empty() {
-            match self.tool.as_str() {
-                "claude" => Some(wrap_command_ignore_suspend("claude")),
-                "codex" => Some(wrap_command_ignore_suspend("codex")),
-                _ => None,
-            }
         } else {
-            Some(wrap_command_ignore_suspend(&self.command))
+            // Run on_launch hooks on host for non-sandboxed sessions
+            if let Some(ref hook_cmds) = on_launch_hooks {
+                if let Err(e) = super::repo_config::execute_hooks(
+                    hook_cmds,
+                    std::path::Path::new(&self.project_path),
+                ) {
+                    tracing::warn!("on_launch hook failed: {}", e);
+                }
+            }
+
+            if self.command.is_empty() {
+                match self.tool.as_str() {
+                    "claude" => Some(wrap_command_ignore_suspend("claude")),
+                    "vibe" => Some(wrap_command_ignore_suspend("vibe")),
+                    "codex" => Some(wrap_command_ignore_suspend("codex")),
+                    "gemini" => Some(wrap_command_ignore_suspend("gemini")),
+                    _ => None,
+                }
+            } else {
+                Some(wrap_command_ignore_suspend(&self.command))
+            }
         };
 
         session.create_with_size(&self.project_path, cmd.as_deref(), size)?;
@@ -275,44 +520,34 @@ impl Instance {
 
     /// Apply all configured tmux options (status bar, mouse, etc.) to the agent session.
     fn apply_tmux_options(&self) {
-        use crate::tmux::status_bar::{apply_all_tmux_options, SandboxDisplay};
-
         let session_name = tmux::Session::generate_name(&self.id, &self.title);
         let branch = self.worktree_info.as_ref().map(|w| w.branch.as_str());
-        let sandbox = self.sandbox_info.as_ref().and_then(|s| {
-            if s.enabled {
-                Some(SandboxDisplay {
-                    container_name: s.container_name.clone(),
-                })
-            } else {
-                None
-            }
-        });
+        let sandbox = self.sandbox_display();
 
-        apply_all_tmux_options(&session_name, &self.title, branch, sandbox.as_ref());
+        crate::tmux::status_bar::apply_all_tmux_options(
+            &session_name,
+            &self.title,
+            branch,
+            sandbox.as_ref(),
+        );
     }
 
     /// Apply all configured tmux options to the terminal session.
     fn apply_terminal_tmux_options(&self) {
-        use crate::tmux::status_bar::{apply_all_tmux_options, SandboxDisplay};
-
         let session_name = tmux::TerminalSession::generate_name(&self.id, &self.title);
         let terminal_title = format!("{} (terminal)", self.title);
         let branch = self.worktree_info.as_ref().map(|w| w.branch.as_str());
-        let sandbox = self.sandbox_info.as_ref().and_then(|s| {
-            if s.enabled {
-                Some(SandboxDisplay {
-                    container_name: s.container_name.clone(),
-                })
-            } else {
-                None
-            }
-        });
+        let sandbox = self.sandbox_display();
 
-        apply_all_tmux_options(&session_name, &terminal_title, branch, sandbox.as_ref());
+        crate::tmux::status_bar::apply_all_tmux_options(
+            &session_name,
+            &terminal_title,
+            branch,
+            sandbox.as_ref(),
+        );
     }
 
-    fn ensure_container_running(&mut self) -> Result<()> {
+    pub fn ensure_container_running(&mut self) -> Result<()> {
         let sandbox = self
             .sandbox_info
             .as_ref()
@@ -335,9 +570,9 @@ impl Instance {
 
         docker::ensure_named_volume(CLAUDE_AUTH_VOLUME)?;
         docker::ensure_named_volume(OPENCODE_AUTH_VOLUME)?;
+        docker::ensure_named_volume(VIBE_AUTH_VOLUME)?;
         docker::ensure_named_volume(CODEX_AUTH_VOLUME)?;
-
-        crate::migrations::run_lazy_docker_migrations();
+        docker::ensure_named_volume(GEMINI_AUTH_VOLUME)?;
 
         let config = self.build_container_config()?;
         let container_id = container.create(&config)?;
@@ -350,20 +585,91 @@ impl Instance {
         Ok(())
     }
 
-    fn build_container_config(&self) -> Result<ContainerConfig> {
-        let home =
-            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    /// Compute volume mount paths for Docker container.
+    ///
+    /// For bare repo worktrees, mounts the entire bare repo and sets working_dir to the worktree.
+    /// This allows git commands inside the container to access the full repository structure.
+    ///
+    /// Returns (host_mount_path, container_mount_path, working_dir)
+    fn compute_volume_paths(
+        &self,
+        project_path: &std::path::Path,
+    ) -> Result<(String, String, String)> {
+        // Try to find the main repo if this is a git repository
+        if let Ok(main_repo) = GitWorktree::find_main_repo(project_path) {
+            // Canonicalize paths for reliable comparison (handles symlinks like /tmp -> /private/tmp)
+            let main_repo_canonical = main_repo
+                .canonicalize()
+                .unwrap_or_else(|_| main_repo.clone());
+            let project_canonical = project_path
+                .canonicalize()
+                .unwrap_or_else(|_| project_path.to_path_buf());
 
-        // Extract dir name from project path to preserve it in the container mount
-        let dir_name = std::path::Path::new(&self.project_path)
+            // Check if main repo is a bare repo and project_path is a worktree within it
+            if GitWorktree::is_bare_repo(&main_repo) && main_repo_canonical != project_canonical {
+                // Bare repo worktree: mount the entire repo, set working_dir to the worktree
+                let repo_name = main_repo_canonical
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "workspace".to_string());
+
+                // Calculate relative path from main_repo to project_path (using canonical paths)
+                let relative_worktree = project_canonical
+                    .strip_prefix(&main_repo_canonical)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_default();
+
+                let container_base = format!("/workspace/{}", repo_name);
+                let working_dir = if relative_worktree.as_os_str().is_empty() {
+                    container_base.clone()
+                } else {
+                    format!("{}/{}", container_base, relative_worktree.display())
+                };
+
+                return Ok((
+                    main_repo_canonical.to_string_lossy().to_string(),
+                    container_base,
+                    working_dir,
+                ));
+            }
+        }
+
+        // Default behavior: mount project_path directly
+        let dir_name = project_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "workspace".to_string());
         let workspace_path = format!("/workspace/{}", dir_name);
 
+        Ok((
+            self.project_path.clone(),
+            workspace_path.clone(),
+            workspace_path,
+        ))
+    }
+
+    /// Get the container working directory for this instance.
+    pub fn container_workdir(&self) -> String {
+        self.compute_volume_paths(std::path::Path::new(&self.project_path))
+            .map(|(_, _, wd)| wd)
+            .unwrap_or_else(|_| "/workspace".to_string())
+    }
+
+    fn build_container_config(&self) -> Result<ContainerConfig> {
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+
+        let project_path = std::path::Path::new(&self.project_path);
+
+        // Determine mount path and working directory.
+        // For bare repo worktrees, mount the entire bare repo and set working_dir to the worktree.
+        // This allows git commands to access the full repository structure.
+        let (mount_host_path, container_base_path, workspace_path) =
+            self.compute_volume_paths(project_path)?;
+
         let mut volumes = vec![VolumeMount {
-            host_path: self.project_path.clone(),
-            container_path: workspace_path.clone(),
+            host_path: mount_host_path,
+            container_path: container_base_path,
             read_only: false,
         }];
 
@@ -396,7 +702,17 @@ impl Instance {
             });
         }
 
-        let named_volumes = vec![
+        let vibe_config = home.join(".vibe");
+        let has_vibe_host_mount = vibe_config.exists();
+        if has_vibe_host_mount {
+            volumes.push(VolumeMount {
+                host_path: vibe_config.to_string_lossy().to_string(),
+                container_path: format!("{}/.vibe", CONTAINER_HOME),
+                read_only: false,
+            });
+        }
+
+        let mut named_volumes = vec![
             (
                 CLAUDE_AUTH_VOLUME.to_string(),
                 format!("{}/.claude", CONTAINER_HOME),
@@ -409,15 +725,30 @@ impl Instance {
                 CODEX_AUTH_VOLUME.to_string(),
                 format!("{}/.codex", CONTAINER_HOME),
             ),
+            (
+                GEMINI_AUTH_VOLUME.to_string(),
+                format!("{}/.gemini", CONTAINER_HOME),
+            ),
         ];
+
+        // Only add vibe auth volume if we didn't already mount the host config
+        // (can't have duplicate mount points)
+        if !has_vibe_host_mount {
+            named_volumes.push((
+                VIBE_AUTH_VOLUME.to_string(),
+                format!("{}/.vibe", CONTAINER_HOME),
+            ));
+        }
 
         let sandbox_config = super::config::Config::load()
             .ok()
             .map(|c| c.sandbox)
             .unwrap_or_default();
 
-        let mut environment: Vec<(String, String)> = sandbox_config
-            .environment
+        let sandbox_info = self.sandbox_info.as_ref().unwrap();
+        let env_keys = collect_env_keys(&sandbox_config, sandbox_info);
+
+        let mut environment: Vec<(String, String)> = env_keys
             .iter()
             .filter_map(|key| std::env::var(key).ok().map(|val| (key.clone(), val)))
             .collect();
@@ -427,6 +758,8 @@ impl Instance {
             format!("{}/.claude", CONTAINER_HOME),
         ));
 
+        environment.extend(collect_env_values(&sandbox_config, sandbox_info));
+
         if self.is_yolo_mode() && self.tool == "opencode" {
             environment.push((
                 "OPENCODE_PERMISSION".to_string(),
@@ -434,10 +767,17 @@ impl Instance {
             ));
         }
 
+        let anonymous_volumes: Vec<String> = sandbox_config
+            .volume_ignores
+            .iter()
+            .map(|ignore| format!("{}/{}", workspace_path, ignore))
+            .collect();
+
         Ok(ContainerConfig {
             working_dir: workspace_path,
             volumes,
             named_volumes,
+            anonymous_volumes,
             environment,
             cpu_limit: sandbox_config.cpu_limit,
             memory_limit: sandbox_config.memory_limit,
@@ -507,33 +847,6 @@ impl Instance {
             Ok(status) => status,
             Err(_) => Status::Idle,
         };
-
-        // Detect Claude session ID if applicable
-        if self.tool == "claude" && self.claude_session_id.is_none() {
-            if let Ok(Some(id)) = super::claude::detect_session_id(&self.project_path) {
-                self.claude_session_id = Some(id);
-                self.claude_detected_at = Some(Utc::now());
-            }
-        }
-    }
-
-    pub fn fork(&self, new_title: &str, new_group: &str) -> Result<Instance> {
-        if self.tool != "claude" {
-            anyhow::bail!("Fork is only supported for Claude sessions");
-        }
-
-        let claude_id = self
-            .claude_session_id
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No Claude session ID to fork"))?;
-
-        let mut forked = Self::new(new_title, &self.project_path);
-        forked.group_path = new_group.to_string();
-        forked.command = format!("claude --resume {}", claude_id);
-        forked.tool = "claude".to_string();
-        forked.parent_session_id = Some(self.id.clone());
-
-        Ok(forked)
     }
 
     pub fn capture_output_with_size(
@@ -563,11 +876,20 @@ fn wrap_command_ignore_suspend(cmd: &str) -> String {
     format!("bash -c 'stty susp undef; exec {}'", cmd)
 }
 
+/// All supported coding tools.
+/// When adding a new tool, update:
+/// - This constant
+/// - `detect_tool()` in cli/add.rs
+/// - `detect_status_from_content()` in tmux/status_detection.rs
+/// - `default_tool_fields()` in tui/settings/fields.rs (options list and match statements)
+/// - `apply_field_to_global()` and `apply_field_to_profile()` in tui/settings/fields.rs
+pub const SUPPORTED_TOOLS: &[&str] = &["claude", "opencode", "vibe", "codex", "gemini"];
+
 /// Tools that have YOLO mode support configured.
 /// When adding a new tool, add it here and implement YOLO support in:
-/// - `start()` for command construction (Claude and Codex use CLI flags)
+/// - `start()` for command construction (Claude uses CLI flag, Vibe uses --auto-approve, Codex uses CLI flag)
 /// - `build_container_config()` for environment variables (OpenCode uses env var)
-pub const YOLO_SUPPORTED_TOOLS: &[&str] = &["claude", "opencode", "codex"];
+pub const YOLO_SUPPORTED_TOOLS: &[&str] = &["claude", "opencode", "vibe", "codex", "gemini"];
 
 #[cfg(test)]
 mod tests {
@@ -600,7 +922,9 @@ mod tests {
         let available_tools = crate::tmux::AvailableTools {
             claude: true,
             opencode: true,
+            vibe: true,
             codex: true,
+            gemini: true,
         };
         for tool in available_tools.available_list() {
             assert!(
@@ -625,6 +949,8 @@ mod tests {
             container_name: "test".to_string(),
             created_at: None,
             yolo_mode: Some(true),
+            extra_env_keys: None,
+            extra_env_values: None,
         });
         assert!(inst.is_yolo_mode());
 
@@ -652,6 +978,8 @@ mod tests {
             container_name: "test".to_string(),
             created_at: None,
             yolo_mode: None,
+            extra_env_keys: None,
+            extra_env_values: None,
         });
         assert!(!inst.is_sandboxed());
     }
@@ -666,6 +994,8 @@ mod tests {
             container_name: "test".to_string(),
             created_at: None,
             yolo_mode: None,
+            extra_env_keys: None,
+            extra_env_values: None,
         });
         assert!(inst.is_sandboxed());
     }
@@ -690,6 +1020,13 @@ mod tests {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.tool = "codex".to_string();
         assert_eq!(inst.get_tool_command(), "codex");
+    }
+
+    #[test]
+    fn test_get_tool_command_gemini() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "gemini".to_string();
+        assert_eq!(inst.get_tool_command(), "gemini");
     }
 
     #[test]
@@ -789,6 +1126,8 @@ mod tests {
             container_name: "test_container".to_string(),
             created_at: Some(Utc::now()),
             yolo_mode: Some(true),
+            extra_env_keys: Some(vec!["MY_VAR".to_string(), "OTHER_VAR".to_string()]),
+            extra_env_values: None,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -799,6 +1138,7 @@ mod tests {
         assert_eq!(info.image, deserialized.image);
         assert_eq!(info.container_name, deserialized.container_name);
         assert_eq!(info.yolo_mode, deserialized.yolo_mode);
+        assert_eq!(info.extra_env_keys, deserialized.extra_env_keys);
     }
 
     #[test]
@@ -869,51 +1209,6 @@ mod tests {
         assert!(wt.managed_by_aoe);
     }
 
-    // Tests for fork
-    #[test]
-    fn test_fork_non_claude_tool() {
-        let mut inst = Instance::new("Test", "/tmp/test");
-        inst.tool = "opencode".to_string();
-
-        let result = inst.fork("Forked", "group");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("only supported for Claude"));
-    }
-
-    #[test]
-    fn test_fork_without_claude_session_id() {
-        let mut inst = Instance::new("Test", "/tmp/test");
-        inst.tool = "claude".to_string();
-        inst.claude_session_id = None;
-
-        let result = inst.fork("Forked", "group");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No Claude session ID"));
-    }
-
-    #[test]
-    fn test_fork_success() {
-        let mut inst = Instance::new("Original", "/tmp/test");
-        inst.tool = "claude".to_string();
-        inst.claude_session_id = Some("session123".to_string());
-
-        let forked = inst.fork("Forked Session", "new/group").unwrap();
-
-        assert_eq!(forked.title, "Forked Session");
-        assert_eq!(forked.group_path, "new/group");
-        assert_eq!(forked.project_path, inst.project_path);
-        assert_eq!(forked.tool, "claude");
-        assert!(forked.command.contains("--resume"));
-        assert!(forked.command.contains("session123"));
-        assert_eq!(forked.parent_session_id, Some(inst.id.clone()));
-    }
-
     // Test generate_id function properties
     #[test]
     fn test_generate_id_uniqueness() {
@@ -961,5 +1256,148 @@ mod tests {
             created_at: None,
         });
         assert!(!inst.has_terminal());
+    }
+
+    mod compute_volume_paths_tests {
+        use super::*;
+        use std::path::Path;
+        use tempfile::TempDir;
+
+        fn setup_regular_repo() -> (TempDir, std::path::PathBuf) {
+            let dir = TempDir::new().unwrap();
+            let repo = git2::Repository::init(dir.path()).unwrap();
+
+            // Create initial commit so HEAD is valid
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "Initial", &tree, &[])
+                .unwrap();
+
+            let repo_path = dir.path().to_path_buf();
+            (dir, repo_path)
+        }
+
+        fn setup_bare_repo_with_worktree() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+            let dir = TempDir::new().unwrap();
+            let bare_path = dir.path().join(".bare");
+
+            // Create bare repository
+            let repo = git2::Repository::init_bare(&bare_path).unwrap();
+
+            // Create initial commit
+            let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+            let tree_id = repo.treebuilder(None).unwrap().write().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "Initial", &tree, &[])
+                .unwrap();
+
+            // Create .git file pointing to bare repo
+            std::fs::write(dir.path().join(".git"), "gitdir: ./.bare\n").unwrap();
+
+            // Create worktree
+            let worktree_path = dir.path().join("main");
+            let _ = std::process::Command::new("git")
+                .args(["worktree", "add", worktree_path.to_str().unwrap(), "HEAD"])
+                .current_dir(&bare_path)
+                .output();
+
+            let main_repo_path = dir.path().to_path_buf();
+            (dir, main_repo_path, worktree_path)
+        }
+
+        #[test]
+        fn test_compute_volume_paths_regular_repo() {
+            let (_dir, repo_path) = setup_regular_repo();
+            let inst = Instance::new("test", repo_path.to_str().unwrap());
+
+            let (mount_path, container_path, working_dir) =
+                inst.compute_volume_paths(&repo_path).unwrap();
+
+            // Regular repo: mount path should be the project path
+            assert_eq!(mount_path, repo_path.to_string_lossy().to_string());
+            // Container path and working dir should be the same
+            assert_eq!(container_path, working_dir);
+            // Should be /workspace/{dir_name}
+            let dir_name = repo_path.file_name().unwrap().to_string_lossy();
+            assert_eq!(container_path, format!("/workspace/{}", dir_name));
+        }
+
+        #[test]
+        fn test_compute_volume_paths_non_git_directory() {
+            let dir = TempDir::new().unwrap();
+            let inst = Instance::new("test", dir.path().to_str().unwrap());
+
+            let (mount_path, container_path, working_dir) =
+                inst.compute_volume_paths(dir.path()).unwrap();
+
+            // Non-git: mount path should be the project path
+            assert_eq!(mount_path, dir.path().to_string_lossy().to_string());
+            // Container path and working dir should be the same
+            assert_eq!(container_path, working_dir);
+        }
+
+        #[test]
+        fn test_compute_volume_paths_bare_repo_worktree() {
+            let (_dir, main_repo_path, worktree_path) = setup_bare_repo_with_worktree();
+
+            // Skip if worktree wasn't created (git might not be available)
+            if !worktree_path.exists() {
+                return;
+            }
+
+            let inst = Instance::new("test", worktree_path.to_str().unwrap());
+
+            let (mount_path, container_path, working_dir) =
+                inst.compute_volume_paths(&worktree_path).unwrap();
+
+            // Canonicalize paths for comparison (handles /var -> /private/var on macOS)
+            let mount_path_canon = Path::new(&mount_path).canonicalize().unwrap();
+            let main_repo_canon = main_repo_path.canonicalize().unwrap();
+
+            // For bare repo worktree: mount the entire repo root
+            assert_eq!(
+                mount_path_canon, main_repo_canon,
+                "Should mount the bare repo root, not just the worktree"
+            );
+
+            // Container path should be /workspace/{repo_name}
+            let repo_name = main_repo_path.file_name().unwrap().to_string_lossy();
+            assert_eq!(
+                container_path,
+                format!("/workspace/{}", repo_name),
+                "Container mount path should be /workspace/{{repo_name}}"
+            );
+
+            // Working dir should point to the worktree within the mount
+            assert!(
+                working_dir.starts_with(&format!("/workspace/{}", repo_name)),
+                "Working dir should be under /workspace/{{repo_name}}"
+            );
+            assert!(
+                working_dir.ends_with("/main"),
+                "Working dir should end with worktree name 'main', got: {}",
+                working_dir
+            );
+        }
+
+        #[test]
+        fn test_compute_volume_paths_bare_repo_root() {
+            let (_dir, main_repo_path, _worktree_path) = setup_bare_repo_with_worktree();
+
+            // When project_path is the bare repo root itself
+            let inst = Instance::new("test", main_repo_path.to_str().unwrap());
+
+            let (mount_path, _container_path, working_dir) =
+                inst.compute_volume_paths(&main_repo_path).unwrap();
+
+            // When at repo root, mount path equals project path
+            let mount_canon = Path::new(&mount_path).canonicalize().unwrap();
+            let main_canon = main_repo_path.canonicalize().unwrap();
+            assert_eq!(mount_canon, main_canon);
+
+            // Working dir should be set
+            assert!(!working_dir.is_empty());
+        }
     }
 }

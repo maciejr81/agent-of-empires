@@ -33,7 +33,9 @@ fn create_test_env_empty() -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -55,7 +57,9 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -83,7 +87,9 @@ fn create_test_env_with_groups() -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -166,10 +172,12 @@ fn test_has_dialog_returns_true_for_new_dialog() {
         AvailableTools {
             claude: true,
             opencode: false,
+            vibe: false,
             codex: false,
+            gemini: false,
         },
         Vec::new(),
-        None,
+        "default",
     ));
     assert!(env.view.has_dialog());
 }
@@ -593,7 +601,9 @@ fn test_get_next_profile_cycles_through_profiles() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -615,7 +625,9 @@ fn test_get_next_profile_wraps_around() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -636,7 +648,9 @@ fn test_uppercase_p_returns_switch_profile_action() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let mut view = HomeView::new(storage, tools).unwrap();
 
@@ -685,7 +699,7 @@ fn test_enter_returns_attach_terminal_in_terminal_view() {
 
     // In Terminal view, Enter returns AttachTerminal
     let action = view.handle_key(key(KeyCode::Enter));
-    assert!(matches!(action, Some(Action::AttachTerminal(_))));
+    assert!(matches!(action, Some(Action::AttachTerminal(_, _))));
 }
 
 #[test]
@@ -768,6 +782,8 @@ fn create_test_env_with_group_sessions() -> TestEnv {
         container_name: "test-container".to_string(),
         created_at: None,
         yolo_mode: None,
+        extra_env_keys: None,
+        extra_env_values: None,
     });
     instances.push(inst3);
 
@@ -783,7 +799,9 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
@@ -817,7 +835,9 @@ fn test_group_has_managed_worktrees() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -843,6 +863,8 @@ fn test_group_has_containers() {
         container_name: "test-container".to_string(),
         created_at: None,
         yolo_mode: None,
+        extra_env_keys: None,
+        extra_env_values: None,
     });
 
     let mut inst2 = Instance::new("other-session", "/tmp/other");
@@ -853,7 +875,9 @@ fn test_group_has_containers() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let view = HomeView::new(storage, tools).unwrap();
 
@@ -918,6 +942,7 @@ fn test_delete_group_with_sessions_updates_groups_field() {
     let options = GroupDeleteOptions {
         delete_sessions: true,
         delete_worktrees: false,
+        delete_branches: false,
         delete_containers: false,
     };
     env.view.delete_group_with_sessions(&options).unwrap();
@@ -971,7 +996,9 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let mut view = HomeView::new(storage, tools).unwrap();
 
@@ -984,6 +1011,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
     let options = GroupDeleteOptions {
         delete_sessions: true,
         delete_worktrees: true,
+        delete_branches: false,
         delete_containers: false,
     };
     view.delete_group_with_sessions(&options).unwrap();
@@ -1012,6 +1040,8 @@ fn test_delete_group_with_sessions_respects_container_option() {
         container_name: "test-container".to_string(),
         created_at: None,
         yolo_mode: None,
+        extra_env_keys: None,
+        extra_env_values: None,
     });
 
     storage.save(&[inst1]).unwrap();
@@ -1019,7 +1049,9 @@ fn test_delete_group_with_sessions_respects_container_option() {
     let tools = AvailableTools {
         claude: true,
         opencode: false,
+        vibe: false,
         codex: false,
+        gemini: false,
     };
     let mut view = HomeView::new(storage, tools).unwrap();
 
@@ -1032,6 +1064,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
     let options = GroupDeleteOptions {
         delete_sessions: true,
         delete_worktrees: false,
+        delete_branches: false,
         delete_containers: true,
     };
     view.delete_group_with_sessions(&options).unwrap();
@@ -1065,6 +1098,7 @@ fn test_delete_group_includes_nested_groups() {
     let options = GroupDeleteOptions {
         delete_sessions: true,
         delete_worktrees: false,
+        delete_branches: false,
         delete_containers: false,
     };
     env.view.delete_group_with_sessions(&options).unwrap();
@@ -1202,4 +1236,67 @@ fn test_group_collapsed_state_saved_to_storage() {
         saved_group.collapsed,
         "collapsed state should be persisted to storage"
     );
+}
+
+#[test]
+#[serial]
+fn test_list_width_default() {
+    let env = create_test_env_empty();
+    assert_eq!(env.view.list_width, 35);
+}
+
+#[test]
+#[serial]
+fn test_shrink_list() {
+    let mut env = create_test_env_empty();
+    env.view.shrink_list();
+    assert_eq!(env.view.list_width, 30);
+}
+
+#[test]
+#[serial]
+fn test_grow_list() {
+    let mut env = create_test_env_empty();
+    env.view.grow_list();
+    assert_eq!(env.view.list_width, 40);
+}
+
+#[test]
+#[serial]
+fn test_shrink_list_clamps_at_minimum() {
+    let mut env = create_test_env_empty();
+    env.view.list_width = 12;
+    env.view.shrink_list();
+    assert_eq!(env.view.list_width, 10);
+    env.view.shrink_list();
+    assert_eq!(env.view.list_width, 10);
+}
+
+#[test]
+#[serial]
+fn test_grow_list_clamps_at_maximum() {
+    let mut env = create_test_env_empty();
+    env.view.list_width = 78;
+    env.view.grow_list();
+    assert_eq!(env.view.list_width, 80);
+    env.view.grow_list();
+    assert_eq!(env.view.list_width, 80);
+}
+
+#[test]
+#[serial]
+fn test_uppercase_h_shrinks_list() {
+    let mut env = create_test_env_empty();
+    assert_eq!(env.view.list_width, 35);
+    env.view.handle_key(key(KeyCode::Char('H')));
+    assert_eq!(env.view.list_width, 30);
+}
+
+#[test]
+#[serial]
+fn test_uppercase_l_grows_list() {
+    let mut env = create_test_env_empty();
+    assert_eq!(env.view.list_width, 35);
+    env.view.handle_key(key(KeyCode::Char('L')));
+    assert_eq!(env.view.list_width, 40);
 }

@@ -1,16 +1,17 @@
 //! Input handling for HomeView
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use super::{HomeView, ViewMode};
-use crate::session::{Item, Status};
+use super::{HomeView, TerminalMode, ViewMode};
+use crate::session::{list_profiles, repo_config, Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
-    ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, InfoDialog,
-    NewSessionDialog, RenameDialog, UnifiedDeleteDialog,
+    ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, HookTrustAction,
+    InfoDialog, NewSessionData, NewSessionDialog, RenameDialog, UnifiedDeleteDialog,
 };
+use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
 
 impl HomeView {
@@ -46,6 +47,8 @@ impl HomeView {
                 SettingsAction::Continue => return None,
                 SettingsAction::Close => {
                     self.settings_view = None;
+                    // Refresh config-dependent state in case settings changed
+                    self.refresh_from_config();
                     return None;
                 }
                 SettingsAction::UnsavedChangesWarning => {
@@ -57,6 +60,21 @@ impl HomeView {
                     ));
                     self.settings_close_confirm = true;
                     return None;
+                }
+            }
+        }
+
+        // Handle diff view (full-screen takeover)
+        if let Some(ref mut diff_view) = self.diff_view {
+            match diff_view.handle_key(key) {
+                DiffAction::Continue => return None,
+                DiffAction::Close => {
+                    self.diff_view = None;
+                    return None;
+                }
+                DiffAction::EditFile(path) => {
+                    // Launch external editor (vim or nano)
+                    return Some(Action::EditFile(path));
                 }
             }
         }
@@ -103,6 +121,40 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.hook_trust_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.hook_trust_dialog = None;
+                    self.pending_hook_trust_data = None;
+                }
+                DialogResult::Submit(action) => {
+                    self.hook_trust_dialog = None;
+                    if let Some(data) = self.pending_hook_trust_data.take() {
+                        match action {
+                            HookTrustAction::Trust {
+                                hooks,
+                                hooks_hash,
+                                project_path,
+                            } => {
+                                if let Err(e) = repo_config::trust_repo(
+                                    std::path::Path::new(&project_path),
+                                    &hooks_hash,
+                                ) {
+                                    tracing::error!("Failed to trust repo: {}", e);
+                                }
+                                return self.create_session_with_hooks(data, Some(hooks));
+                            }
+                            HookTrustAction::Skip => {
+                                return self.create_session_with_hooks(data, None);
+                            }
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+
         let dialog_result = self
             .new_dialog
             .as_mut()
@@ -120,24 +172,24 @@ impl HomeView {
                     }
                 }
                 DialogResult::Submit(data) => {
-                    // Use background creation for sandbox sessions to avoid blocking UI
-                    if data.sandbox {
-                        self.request_creation(data);
-                        // Don't close dialog - it will show loading state
-                        // Result will be handled by apply_creation_results in event loop
-                    } else {
-                        // Non-sandbox sessions are fast, create synchronously
-                        match self.create_session(data) {
-                            Ok(session_id) => {
-                                self.new_dialog = None;
-                                return Some(Action::AttachSession(session_id));
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to create session: {}", e);
-                                if let Some(dialog) = &mut self.new_dialog {
-                                    dialog.set_error(e.to_string());
-                                }
-                            }
+                    // Check for hooks before creating the session
+                    match repo_config::check_hook_trust(std::path::Path::new(&data.path)) {
+                        Ok(repo_config::HookTrustStatus::NeedsTrust { hooks, hooks_hash }) => {
+                            use crate::tui::dialogs::HookTrustDialog;
+                            self.hook_trust_dialog =
+                                Some(HookTrustDialog::new(hooks, hooks_hash, data.path.clone()));
+                            self.pending_hook_trust_data = Some(data);
+                        }
+                        Ok(repo_config::HookTrustStatus::Trusted(hooks)) => {
+                            let hooks_opt = if hooks.is_empty() { None } else { Some(hooks) };
+                            return self.create_session_with_hooks(data, hooks_opt);
+                        }
+                        Ok(repo_config::HookTrustStatus::NoHooks) => {
+                            return self.create_session_with_hooks(data, None);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to check repo hooks: {}", e);
+                            return self.create_session_with_hooks(data, None);
                         }
                     }
                 }
@@ -208,7 +260,11 @@ impl HomeView {
                 }
                 DialogResult::Submit(data) => {
                     self.rename_dialog = None;
-                    if let Err(e) = self.rename_selected(&data.title, data.group.as_deref()) {
+                    if let Err(e) = self.rename_selected(
+                        &data.title,
+                        data.group.as_deref(),
+                        data.profile.as_deref(),
+                    ) {
                         tracing::error!("Failed to rename session: {}", e);
                     }
                 }
@@ -253,6 +309,24 @@ impl HomeView {
                     ViewMode::Terminal => ViewMode::Agent,
                 };
             }
+            KeyCode::Char('c') => {
+                // Toggle container/host terminal mode (only in Terminal view for sandboxed sessions)
+                if self.view_mode == ViewMode::Terminal {
+                    if let Some(id) = &self.selected_session {
+                        if let Some(inst) = self.instance_map.get(id) {
+                            if inst.is_sandboxed() {
+                                let id = id.clone();
+                                self.toggle_terminal_mode(&id);
+                            } else {
+                                self.info_dialog = Some(InfoDialog::new(
+                                    "Not Available",
+                                    "Only sandboxed sessions support container terminals. This session runs directly on the host.",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             KeyCode::Char('/') => {
                 self.search_active = true;
                 self.search_query = Input::default();
@@ -260,11 +334,10 @@ impl HomeView {
             KeyCode::Char('n') => {
                 let existing_titles: Vec<String> =
                     self.instances.iter().map(|i| i.title.clone()).collect();
-                let default_group = self.get_current_group_context();
                 self.new_dialog = Some(NewSessionDialog::new(
                     self.available_tools.clone(),
                     existing_titles,
-                    default_group,
+                    self.storage.profile(),
                 ));
             }
             KeyCode::Char('s') => {
@@ -276,6 +349,34 @@ impl HomeView {
                         self.info_dialog = Some(InfoDialog::new(
                             "Error",
                             &format!("Failed to open settings: {}", e),
+                        ));
+                    }
+                }
+            }
+            KeyCode::Char('D') => {
+                // Open diff view - requires a selected session
+                let Some(session_id) = &self.selected_session else {
+                    self.info_dialog = Some(InfoDialog::new(
+                        "No Session Selected",
+                        "Select a session to view its diff.",
+                    ));
+                    return None;
+                };
+
+                let Some(inst) = self.instance_map.get(session_id) else {
+                    self.info_dialog =
+                        Some(InfoDialog::new("Error", "Could not find session data."));
+                    return None;
+                };
+
+                let repo_path = std::path::PathBuf::from(&inst.project_path);
+                match DiffView::new(repo_path) {
+                    Ok(view) => self.diff_view = Some(view),
+                    Err(e) => {
+                        tracing::error!("Failed to open diff view: {}", e);
+                        self.info_dialog = Some(InfoDialog::new(
+                            "Error",
+                            &format!("Failed to open diff view: {}", e),
                         ));
                     }
                 }
@@ -346,7 +447,15 @@ impl HomeView {
                         if inst.status == Status::Deleting {
                             return None;
                         }
-                        self.rename_dialog = Some(RenameDialog::new(&inst.title, &inst.group_path));
+                        let current_profile = self.storage.profile().to_string();
+                        let profiles =
+                            list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
+                        self.rename_dialog = Some(RenameDialog::new(
+                            &inst.title,
+                            &inst.group_path,
+                            &current_profile,
+                            profiles,
+                        ));
                     }
                 }
             }
@@ -381,12 +490,29 @@ impl HomeView {
                     }
                     return match self.view_mode {
                         ViewMode::Agent => Some(Action::AttachSession(id.clone())),
-                        ViewMode::Terminal => Some(Action::AttachTerminal(id.clone())),
+                        ViewMode::Terminal => {
+                            let terminal_mode = if let Some(inst) = self.instance_map.get(id) {
+                                if inst.is_sandboxed() {
+                                    self.get_terminal_mode(id)
+                                } else {
+                                    TerminalMode::Host
+                                }
+                            } else {
+                                TerminalMode::Host
+                            };
+                            Some(Action::AttachTerminal(id.clone(), terminal_mode))
+                        }
                     };
                 } else if let Some(Item::Group { path, .. }) = self.flat_items.get(self.cursor) {
                     let path = path.clone();
                     self.toggle_group_collapsed(&path);
                 }
+            }
+            KeyCode::Char('H') => {
+                self.shrink_list();
+            }
+            KeyCode::Char('L') => {
+                self.grow_list();
             }
             KeyCode::Left | KeyCode::Char('h') => {
                 if let Some(Item::Group {
@@ -588,5 +714,57 @@ impl HomeView {
         self.filtered_items = Some(matches);
         self.cursor = 0;
         self.update_selected();
+    }
+
+    /// Create a session with optional hooks. Delegates to the background
+    /// `CreationPoller` when hooks are present (to avoid freezing the TUI on
+    /// slow commands like `npm install`) or when the session is sandboxed.
+    fn create_session_with_hooks(
+        &mut self,
+        data: NewSessionData,
+        hooks: Option<crate::session::HooksConfig>,
+    ) -> Option<Action> {
+        let has_hooks = hooks
+            .as_ref()
+            .is_some_and(|h| !h.on_create.is_empty() || !h.on_launch.is_empty());
+
+        if data.sandbox || has_hooks {
+            self.request_creation(data, hooks);
+            return None;
+        }
+
+        match self.create_session(data) {
+            Ok(session_id) => {
+                self.new_dialog = None;
+                Some(Action::AttachSession(session_id))
+            }
+            Err(e) => {
+                tracing::error!("Failed to create session: {}", e);
+                if let Some(dialog) = &mut self.new_dialog {
+                    dialog.set_error(e.to_string());
+                }
+                None
+            }
+        }
+    }
+
+    /// Handle a mouse event
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<Action> {
+        // Pass mouse events to diff view if active
+        if let Some(ref mut diff_view) = self.diff_view {
+            match diff_view.handle_mouse(mouse) {
+                DiffAction::Continue => return None,
+                DiffAction::Close => {
+                    self.diff_view = None;
+                    return None;
+                }
+                DiffAction::EditFile(path) => {
+                    return Some(Action::EditFile(path));
+                }
+            }
+        }
+
+        // No mouse handling for other views currently
+        None
     }
 }

@@ -143,6 +143,8 @@ Sleep 1000ms
 # Skip group field, tool field, worktree field to reach sandbox
 Tab
 Tab
+Space
+Space
 Tab
 Tab
 Sleep 500ms

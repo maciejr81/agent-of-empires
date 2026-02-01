@@ -21,6 +21,8 @@ fn test_sandbox_info_serialization() {
         container_name: "aoe-sandbox-test1234".to_string(),
         created_at: Some(chrono::Utc::now()),
         yolo_mode: None,
+        extra_env_keys: Some(vec!["MY_VAR".to_string()]),
+        extra_env_values: None,
     };
 
     let json = serde_json::to_string(&sandbox_info).unwrap();
@@ -30,6 +32,10 @@ fn test_sandbox_info_serialization() {
     assert_eq!(deserialized.container_id, Some("abc123".to_string()));
     assert_eq!(deserialized.container_name, "aoe-sandbox-test1234");
     assert_eq!(deserialized.image, "ubuntu:latest");
+    assert_eq!(
+        deserialized.extra_env_keys,
+        Some(vec!["MY_VAR".to_string()])
+    );
 }
 
 #[test]
@@ -44,6 +50,8 @@ fn test_instance_is_sandboxed() {
         container_name: "aoe-sandbox-test".to_string(),
         created_at: None,
         yolo_mode: None,
+        extra_env_keys: None,
+        extra_env_values: None,
     });
     assert!(inst.is_sandboxed());
 
@@ -54,6 +62,8 @@ fn test_instance_is_sandboxed() {
         container_name: "aoe-sandbox-test".to_string(),
         created_at: None,
         yolo_mode: None,
+        extra_env_keys: None,
+        extra_env_values: None,
     });
     assert!(!inst.is_sandboxed());
 }
@@ -73,6 +83,8 @@ fn test_sandbox_info_persists_across_save_load() {
         container_name: "aoe-sandbox-abcd1234".to_string(),
         created_at: Some(chrono::Utc::now()),
         yolo_mode: Some(true),
+        extra_env_keys: Some(vec!["API_KEY".to_string(), "SECRET".to_string()]),
+        extra_env_values: None,
     });
 
     storage.save(&[inst.clone()]).unwrap();
@@ -126,6 +138,7 @@ fn test_container_lifecycle() {
         working_dir: "/workspace".to_string(),
         volumes: vec![],
         named_volumes: vec![],
+        anonymous_volumes: vec![],
         environment: vec![],
         cpu_limit: None,
         memory_limit: None,
@@ -166,6 +179,7 @@ fn test_container_force_remove() {
         working_dir: "/workspace".to_string(),
         volumes: vec![],
         named_volumes: vec![],
+        anonymous_volumes: vec![],
         environment: vec![],
         cpu_limit: None,
         memory_limit: None,

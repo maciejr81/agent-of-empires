@@ -6,7 +6,7 @@ use ratatui::widgets::*;
 use crate::tui::styles::Theme;
 
 const DIALOG_WIDTH: u16 = 50;
-const DIALOG_HEIGHT: u16 = 31;
+const DIALOG_HEIGHT: u16 = 34;
 #[cfg(test)]
 const BORDER_HEIGHT: u16 = 2;
 #[cfg(test)]
@@ -23,8 +23,8 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("k/↑", "Move up"),
                 ("h/←", "Collapse group"),
                 ("l/→", "Expand group"),
-                ("g", "Go to top"),
-                ("G", "Go to bottom"),
+                ("g/G", "Go to top / bottom"),
+                ("PgUp/Dn", "Move 10 items up / down"),
             ],
         ),
         (
@@ -36,7 +36,6 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("r", "Rename session"),
                 ("a", "Toggle user-active marker"),
                 ("A", "Filter active sessions"),
-                ("f", "Fork session (Claude)"),
             ],
         ),
         (
@@ -45,6 +44,9 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("t", "Toggle Agent/Terminal view"),
                 ("o", "Toggle groups on/off"),
                 ("S", "Sort by recent activity"),
+                ("c", "Toggle container/host (sandbox)"),
+                ("D", "Diff view (git changes)"),
+                ("H/L", "Resize list panel"),
             ],
         ),
         (
@@ -121,6 +123,18 @@ impl HelpOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_contains_resize_shortcut() {
+        let all = shortcuts();
+        let views_section = all.iter().find(|(name, _)| *name == "Views");
+        assert!(views_section.is_some(), "Views section should exist");
+        let (_, keys) = views_section.unwrap();
+        assert!(
+            keys.iter().any(|(k, _)| *k == "H/L"),
+            "Views section should contain H/L resize shortcut"
+        );
+    }
 
     #[test]
     fn help_content_fits_in_dialog() {

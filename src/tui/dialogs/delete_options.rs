@@ -11,6 +11,7 @@ use crate::tui::styles::Theme;
 #[derive(Clone, Debug, Default)]
 pub struct DeleteOptions {
     pub delete_worktree: bool,
+    pub delete_branch: bool,
     pub delete_sandbox: bool,
 }
 
@@ -25,6 +26,7 @@ pub struct DeleteDialogConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusElement {
     WorktreeCheckbox,
+    BranchCheckbox,
     SandboxCheckbox,
     YesButton,
     NoButton,
@@ -47,6 +49,7 @@ impl UnifiedDeleteDialog {
 
         if config.worktree_branch.is_some() {
             focusable_elements.push(FocusElement::WorktreeCheckbox);
+            focusable_elements.push(FocusElement::BranchCheckbox);
         }
         if config.has_sandbox {
             focusable_elements.push(FocusElement::SandboxCheckbox);
@@ -65,6 +68,8 @@ impl UnifiedDeleteDialog {
 
         let options = DeleteOptions {
             delete_worktree: config.worktree_branch.is_some() && user_config.worktree.auto_cleanup,
+            delete_branch: config.worktree_branch.is_some()
+                && user_config.worktree.delete_branch_on_cleanup,
             delete_sandbox: config.has_sandbox && user_config.sandbox.auto_cleanup,
         };
 
@@ -113,13 +118,28 @@ impl UnifiedDeleteDialog {
             KeyCode::Enter => match self.focus {
                 FocusElement::YesButton => DialogResult::Submit(self.options.clone()),
                 FocusElement::NoButton => DialogResult::Cancel,
-                _ => DialogResult::Submit(self.options.clone()),
+                // Enter on checkbox toggles it (same as Space) rather than submitting
+                FocusElement::WorktreeCheckbox => {
+                    self.options.delete_worktree = !self.options.delete_worktree;
+                    DialogResult::Continue
+                }
+                FocusElement::BranchCheckbox => {
+                    self.options.delete_branch = !self.options.delete_branch;
+                    DialogResult::Continue
+                }
+                FocusElement::SandboxCheckbox => {
+                    self.options.delete_sandbox = !self.options.delete_sandbox;
+                    DialogResult::Continue
+                }
             },
 
             KeyCode::Char(' ') => {
                 match self.focus {
                     FocusElement::WorktreeCheckbox => {
                         self.options.delete_worktree = !self.options.delete_worktree;
+                    }
+                    FocusElement::BranchCheckbox => {
+                        self.options.delete_branch = !self.options.delete_branch;
                     }
                     FocusElement::SandboxCheckbox => {
                         self.options.delete_sandbox = !self.options.delete_sandbox;
@@ -166,7 +186,8 @@ impl UnifiedDeleteDialog {
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let has_worktree = self.config.worktree_branch.is_some();
         let has_sandbox = self.config.has_sandbox;
-        let checkbox_count = (has_worktree as u16) + (has_sandbox as u16);
+        // Count checkboxes: worktree + branch (if worktree exists) + sandbox
+        let checkbox_count = if has_worktree { 2 } else { 0 } + (has_sandbox as u16);
 
         let dialog_width = 55;
         // Add extra height for spacing: 1 after message, 1 before buttons, 1 before hints
@@ -176,15 +197,7 @@ impl UnifiedDeleteDialog {
             7 // message + spacer + buttons + spacer + hints + border
         };
 
-        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-        let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-
-        let dialog_area = Rect {
-            x,
-            y,
-            width: dialog_width.min(area.width),
-            height: dialog_height.min(area.height),
-        };
+        let dialog_area = super::centered_rect(area, dialog_width, dialog_height);
 
         frame.render_widget(Clear, dialog_area);
 
@@ -241,6 +254,19 @@ impl UnifiedDeleteDialog {
                     Some(branch),
                     self.options.delete_worktree,
                     focused,
+                );
+                chunk_idx += 1;
+
+                // Branch checkbox (only shown when worktree exists)
+                let branch_focused = self.focus == FocusElement::BranchCheckbox;
+                self.render_checkbox(
+                    frame,
+                    chunks[chunk_idx],
+                    theme,
+                    "Delete branch",
+                    Some(branch),
+                    self.options.delete_branch,
+                    branch_focused,
                 );
                 chunk_idx += 1;
             }
@@ -390,6 +416,7 @@ mod tests {
     fn test_default_options() {
         let options = DeleteOptions::default();
         assert!(!options.delete_worktree);
+        assert!(!options.delete_branch);
         assert!(!options.delete_sandbox);
     }
 
@@ -413,6 +440,10 @@ mod tests {
             "With default config (auto_cleanup: true), delete_worktree should be true"
         );
         assert!(
+            !dialog.options.delete_branch,
+            "With default config (delete_branch_on_cleanup: false), delete_branch should be false"
+        );
+        assert!(
             dialog.options.delete_sandbox,
             "With default config (auto_cleanup: true), delete_sandbox should be true"
         );
@@ -422,6 +453,9 @@ mod tests {
     fn test_tab_cycles_through_elements() {
         let mut dialog = full_dialog();
         assert_eq!(dialog.focus, FocusElement::WorktreeCheckbox);
+
+        dialog.handle_key(key(KeyCode::Tab));
+        assert_eq!(dialog.focus, FocusElement::BranchCheckbox);
 
         dialog.handle_key(key(KeyCode::Tab));
         assert_eq!(dialog.focus, FocusElement::SandboxCheckbox);
@@ -434,6 +468,19 @@ mod tests {
 
         dialog.handle_key(key(KeyCode::Tab));
         assert_eq!(dialog.focus, FocusElement::WorktreeCheckbox);
+    }
+
+    #[test]
+    fn test_branch_checkbox_toggle() {
+        let mut dialog = full_dialog();
+        dialog.focus = FocusElement::BranchCheckbox;
+        let initial = dialog.options.delete_branch;
+
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(dialog.options.delete_branch, !initial);
+
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(dialog.options.delete_branch, initial);
     }
 
     #[test]
@@ -503,12 +550,14 @@ mod tests {
     fn test_submit_returns_options() {
         let mut dialog = full_dialog();
         dialog.options.delete_worktree = true;
+        dialog.options.delete_branch = true;
         dialog.options.delete_sandbox = true;
 
         let result = dialog.handle_key(key(KeyCode::Char('y')));
         match result {
             DialogResult::Submit(opts) => {
                 assert!(opts.delete_worktree);
+                assert!(opts.delete_branch);
                 assert!(opts.delete_sandbox);
             }
             _ => panic!("Expected Submit"),

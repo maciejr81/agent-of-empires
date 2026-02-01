@@ -82,6 +82,7 @@ impl SettingsView {
                     SettingsFocus::Fields => {
                         if self.selected_field > 0 {
                             self.selected_field -= 1;
+                            self.ensure_field_visible(self.fields_viewport_height);
                         }
                     }
                 }
@@ -98,6 +99,7 @@ impl SettingsView {
                     SettingsFocus::Fields => {
                         if self.selected_field < self.fields.len().saturating_sub(1) {
                             self.selected_field += 1;
+                            self.ensure_field_visible(self.fields_viewport_height);
                         }
                     }
                 }
@@ -386,6 +388,11 @@ impl SettingsView {
                     w.auto_cleanup = None;
                 }
             }
+            FieldKey::DeleteBranchOnCleanup => {
+                if let Some(ref mut w) = self.profile_config.worktree {
+                    w.delete_branch_on_cleanup = None;
+                }
+            }
             // Sandbox
             FieldKey::DefaultImage => {
                 if let Some(ref mut s) = self.profile_config.sandbox {
@@ -395,6 +402,11 @@ impl SettingsView {
             FieldKey::Environment => {
                 if let Some(ref mut s) = self.profile_config.sandbox {
                     s.environment = None;
+                }
+            }
+            FieldKey::EnvironmentValues => {
+                if let Some(ref mut s) = self.profile_config.sandbox {
+                    s.environment_values = None;
                 }
             }
             FieldKey::SandboxAutoCleanup => {
@@ -428,6 +440,16 @@ impl SettingsView {
             FieldKey::YoloModeDefault => {
                 if let Some(ref mut s) = self.profile_config.sandbox {
                     s.yolo_mode_default = None;
+                }
+            }
+            FieldKey::DefaultTerminalMode => {
+                if let Some(ref mut s) = self.profile_config.sandbox {
+                    s.default_terminal_mode = None;
+                }
+            }
+            FieldKey::VolumeIgnores => {
+                if let Some(ref mut s) = self.profile_config.sandbox {
+                    s.volume_ignores = None;
                 }
             }
         }

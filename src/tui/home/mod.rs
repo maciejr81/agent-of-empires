@@ -7,20 +7,24 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use tui_input::Input;
 
-use crate::session::{flatten_tree, Group, GroupTree, Instance, Item, Storage};
+use crate::session::{
+    config::{load_config, save_config},
+    flatten_tree, resolve_config, DefaultTerminalMode, Group, GroupTree, Instance, Item, Storage,
+};
 use crate::tmux::AvailableTools;
 
 use super::creation_poller::{CreationPoller, CreationRequest};
 use super::deletion_poller::DeletionPoller;
 use super::dialogs::{
-    ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, InfoDialog, NewSessionData,
-    NewSessionDialog, RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
+    ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, HookTrustDialog, InfoDialog,
+    NewSessionData, NewSessionDialog, RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
 };
+use super::diff::DiffView;
 use super::settings::SettingsView;
 use super::status_poller::StatusPoller;
 
@@ -40,6 +44,14 @@ pub enum SortMode {
     Default,
     /// Sort by recently accessed (most recent first)
     RecentlyActive,
+}
+
+/// Terminal mode for sandboxed sessions (container vs host)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerminalMode {
+    #[default]
+    Host,
+    Container,
 }
 
 /// Cached preview content to avoid subprocess calls on every frame
@@ -109,6 +121,9 @@ pub struct HomeView {
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
     pub(super) rename_dialog: Option<RenameDialog>,
+    pub(super) hook_trust_dialog: Option<HookTrustDialog>,
+    /// Session data pending hook trust approval
+    pub(super) pending_hook_trust_data: Option<NewSessionData>,
     pub(super) welcome_dialog: Option<WelcomeDialog>,
     pub(super) changelog_dialog: Option<ChangelogDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
@@ -139,15 +154,29 @@ pub struct HomeView {
     pub(super) creation_poller: CreationPoller,
     /// Set to true if user cancelled while creation was pending
     pub(super) creation_cancelled: bool,
+    /// Sessions whose on_launch hooks already ran in the creation poller
+    pub(super) on_launch_hooks_ran: HashSet<String>,
 
     // Performance: preview caching
     pub(super) preview_cache: PreviewCache,
     pub(super) terminal_preview_cache: PreviewCache,
+    pub(super) container_terminal_preview_cache: PreviewCache,
+
+    // Terminal mode for sandboxed sessions (per-session, ephemeral)
+    pub(super) terminal_modes: HashMap<String, TerminalMode>,
+    // Default terminal mode from config
+    pub(super) default_terminal_mode: TerminalMode,
 
     // Settings view
     pub(super) settings_view: Option<SettingsView>,
     /// Flag to indicate we're confirming settings close (unsaved changes)
     pub(super) settings_close_confirm: bool,
+
+    // Diff view
+    pub(super) diff_view: Option<DiffView>,
+
+    // Resizable list column width (percentage-like units)
+    pub(super) list_width: u16,
 }
 
 impl HomeView {
@@ -164,6 +193,14 @@ impl HomeView {
             .collect();
         let group_tree = GroupTree::new_with_groups(&instances, &groups);
         let flat_items = flatten_tree(&group_tree, &instances);
+
+        // Load the resolved config to get the default terminal mode
+        let default_terminal_mode = resolve_config(storage.profile())
+            .map(|config| match config.sandbox.default_terminal_mode {
+                DefaultTerminalMode::Host => TerminalMode::Host,
+                DefaultTerminalMode::Container => TerminalMode::Container,
+            })
+            .unwrap_or_default();
 
         let mut view = Self {
             storage,
@@ -182,6 +219,8 @@ impl HomeView {
             unified_delete_dialog: None,
             group_delete_options_dialog: None,
             rename_dialog: None,
+            hook_trust_dialog: None,
+            pending_hook_trust_data: None,
             welcome_dialog: None,
             changelog_dialog: None,
             info_dialog: None,
@@ -197,10 +236,20 @@ impl HomeView {
             deletion_poller: DeletionPoller::new(),
             creation_poller: CreationPoller::new(),
             creation_cancelled: false,
+            on_launch_hooks_ran: HashSet::new(),
             preview_cache: PreviewCache::default(),
             terminal_preview_cache: PreviewCache::default(),
+            container_terminal_preview_cache: PreviewCache::default(),
+            terminal_modes: HashMap::new(),
+            default_terminal_mode,
             settings_view: None,
             settings_close_confirm: false,
+            diff_view: None,
+            list_width: load_config()
+                .ok()
+                .flatten()
+                .and_then(|c| c.app_state.home_list_width)
+                .unwrap_or(35),
         };
 
         view.update_selected();
@@ -360,17 +409,11 @@ impl HomeView {
                         inst.status = update.status;
                         inst.last_error = update.last_error.clone();
                     }
-                    if update.claude_session_id.is_some() {
-                        inst.claude_session_id = update.claude_session_id.clone();
-                    }
                 }
                 if let Some(inst) = self.instance_map.get_mut(&update.id) {
                     if inst.status != Status::Deleting {
                         inst.status = update.status;
                         inst.last_error = update.last_error;
-                    }
-                    if update.claude_session_id.is_some() {
-                        inst.claude_session_id = update.claude_session_id;
                     }
                 }
             }
@@ -416,15 +459,24 @@ impl HomeView {
     }
 
     /// Request background session creation. Used for sandbox sessions to avoid blocking UI.
-    pub fn request_creation(&mut self, data: NewSessionData) {
+    pub fn request_creation(
+        &mut self,
+        data: NewSessionData,
+        hooks: Option<crate::session::HooksConfig>,
+    ) {
+        let has_hooks = hooks
+            .as_ref()
+            .is_some_and(|h| !h.on_create.is_empty() || !h.on_launch.is_empty());
         if let Some(dialog) = &mut self.new_dialog {
             dialog.set_loading(true);
+            dialog.set_has_hooks(has_hooks);
         }
 
         self.creation_cancelled = false;
         let request = CreationRequest {
             data,
             existing_instances: self.instances.clone(),
+            hooks,
         };
         self.creation_poller.request_creation(request);
     }
@@ -468,6 +520,7 @@ impl HomeView {
             CreationResult::Success {
                 session_id,
                 instance,
+                on_launch_hooks_ran,
                 ..
             } => {
                 let instance = *instance;
@@ -482,6 +535,10 @@ impl HomeView {
                     .save_with_groups(&self.instances, &self.group_tree)
                 {
                     tracing::error!("Failed to save after creation: {}", e);
+                }
+
+                if on_launch_hooks_ran {
+                    self.on_launch_hooks_ran.insert(session_id.clone());
                 }
 
                 let _ = self.reload();
@@ -499,16 +556,25 @@ impl HomeView {
         }
     }
 
+    /// Check if on_launch hooks already ran for this session (and consume the flag).
+    pub fn take_on_launch_hooks_ran(&mut self, session_id: &str) -> bool {
+        self.on_launch_hooks_ran.remove(session_id)
+    }
+
     /// Check if there's a pending creation operation
     pub fn is_creation_pending(&self) -> bool {
         self.creation_poller.is_pending()
     }
 
-    /// Tick the dialog spinner animation if loading
+    /// Tick the dialog spinner animation if loading, and drain hook progress
     pub fn tick_dialog(&mut self) {
         if let Some(dialog) = &mut self.new_dialog {
             if dialog.is_loading() {
                 dialog.tick();
+                // Drain all pending hook progress messages
+                while let Some(progress) = self.creation_poller.try_recv_progress() {
+                    dialog.push_hook_progress(progress);
+                }
             }
         }
     }
@@ -520,10 +586,29 @@ impl HomeView {
             || self.unified_delete_dialog.is_some()
             || self.group_delete_options_dialog.is_some()
             || self.rename_dialog.is_some()
+            || self.hook_trust_dialog.is_some()
             || self.welcome_dialog.is_some()
             || self.changelog_dialog.is_some()
             || self.info_dialog.is_some()
             || self.settings_view.is_some()
+            || self.diff_view.is_some()
+    }
+
+    pub fn shrink_list(&mut self) {
+        self.list_width = self.list_width.saturating_sub(5).max(10);
+        self.save_list_width();
+    }
+
+    pub fn grow_list(&mut self) {
+        self.list_width = (self.list_width + 5).min(80);
+        self.save_list_width();
+    }
+
+    fn save_list_width(&self) {
+        if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
+            config.app_state.home_list_width = Some(self.list_width);
+            let _ = save_config(&config);
+        }
     }
 
     pub fn show_welcome(&mut self) {
@@ -630,22 +715,50 @@ impl HomeView {
         }
     }
 
-    /// Returns the current group context based on selection.
-    /// If a group is selected, returns its path.
-    /// If a session is selected and belongs to a group, returns that group path.
-    pub fn get_current_group_context(&self) -> Option<String> {
-        // If a group is selected, return its path
-        if let Some(group_path) = &self.selected_group {
-            return Some(group_path.clone());
+    /// Get the terminal mode for a session (uses config default if not set)
+    pub fn get_terminal_mode(&self, session_id: &str) -> TerminalMode {
+        self.terminal_modes
+            .get(session_id)
+            .copied()
+            .unwrap_or(self.default_terminal_mode)
+    }
+
+    /// Refresh all config-dependent state from the current profile's config.
+    /// Call this after settings are saved to pick up any changes.
+    pub fn refresh_from_config(&mut self) {
+        if let Ok(config) = resolve_config(self.storage.profile()) {
+            // Refresh default terminal mode for sandboxed sessions
+            self.default_terminal_mode = match config.sandbox.default_terminal_mode {
+                DefaultTerminalMode::Host => TerminalMode::Host,
+                DefaultTerminalMode::Container => TerminalMode::Container,
+            };
+
+            // Add other config-dependent state refreshes here as needed
         }
-        // If a session is selected, return its group_path (if not empty)
-        if let Some(session_id) = &self.selected_session {
-            if let Some(inst) = self.instance_map.get(session_id) {
-                if !inst.group_path.is_empty() {
-                    return Some(inst.group_path.clone());
-                }
-            }
+    }
+
+    /// Toggle terminal mode between Container and Host for a session
+    pub fn toggle_terminal_mode(&mut self, session_id: &str) {
+        let current = self.get_terminal_mode(session_id);
+        let new_mode = match current {
+            TerminalMode::Container => TerminalMode::Host,
+            TerminalMode::Host => TerminalMode::Container,
+        };
+        self.terminal_modes.insert(session_id.to_string(), new_mode);
+    }
+
+    pub fn start_container_terminal_for_instance_with_size(
+        &mut self,
+        id: &str,
+        size: Option<(u16, u16)>,
+    ) -> anyhow::Result<()> {
+        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
+            inst.start_container_terminal_with_size(size)?;
         }
-        None
+        if let Some(inst) = self.instance_map.get_mut(id) {
+            inst.start_container_terminal_with_size(size)?;
+        }
+        // Don't save terminal info for container terminals - it's ephemeral
+        Ok(())
     }
 }

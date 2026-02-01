@@ -2,7 +2,7 @@
 
 ## Overview
 
-Docker sandboxing runs your AI coding agents (Claude Code, OpenCode) inside isolated Docker containers while maintaining access to your project files and credentials.
+Docker sandboxing runs your AI coding agents (Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI) inside isolated Docker containers while maintaining access to your project files and credentials.
 
 **Key Features:**
 - One container per session
@@ -46,6 +46,7 @@ aoe remove <session> --keep-container
 ```toml
 [sandbox]
 enabled_by_default = false
+yolo_mode_default = false
 default_image = "ghcr.io/njbrake/aoe-sandbox:latest"
 auto_cleanup = true
 cpu_limit = "4"
@@ -58,12 +59,16 @@ environment = ["ANTHROPIC_API_KEY"]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `enabled_by_default` | `false` | Auto-enable sandbox for new sessions |
+| `yolo_mode_default` | `false` | Skip agent permission prompts in sandboxed sessions |
 | `default_image` | `ghcr.io/njbrake/aoe-sandbox:latest` | Docker image to use |
 | `auto_cleanup` | `true` | Remove containers when sessions are deleted |
 | `cpu_limit` | (none) | CPU limit (e.g., "4") |
 | `memory_limit` | (none) | Memory limit (e.g., "8g") |
-| `environment` | `[]` | Env vars to pass through |
+| `environment` | `[]` | Env var names to pass through from host |
+| `environment_values` | `{}` | Env vars with explicit values to inject (see below) |
+| `volume_ignores` | `[]` | Directories to exclude from the project mount via anonymous volumes |
 | `extra_volumes` | `[]` | Additional volume mounts |
+| `default_terminal_mode` | `"host"` | Paired terminal location: `"host"` (on host machine) or `"container"` (inside Docker) |
 
 ## Volume Mounts
 
@@ -75,6 +80,7 @@ environment = ["ANTHROPIC_API_KEY"]
 | `~/.gitconfig` | `/root/.gitconfig` | RO | Git config |
 | `~/.ssh/` | `/root/.ssh/` | RO | SSH keys |
 | `~/.config/opencode/` | `/root/.config/opencode/` | RO | OpenCode config |
+| `~/.vibe/` | `/root/.vibe/` | RW | Vibe config (if exists) |
 
 ### Persistent Auth Volumes
 
@@ -82,12 +88,11 @@ environment = ["ANTHROPIC_API_KEY"]
 |-------------|----------------|---------|
 | `aoe-claude-auth` | `/root/.claude/` | Claude Code credentials |
 | `aoe-opencode-auth` | `/root/.local/share/opencode/` | OpenCode credentials |
+| `aoe-vibe-auth` | `/root/.vibe/` | Mistral Vibe credentials |
+| `aoe-codex-auth` | `/root/.codex/` | Codex CLI credentials |
+| `aoe-gemini-auth` | `/root/.gemini/` | Gemini CLI credentials |
 
 **Note:** Auth persists across containers. First session requires authentication, subsequent sessions reuse it.
-
-### Source Code Reference
-
-Volume mounts are defined in `src/session/instance.rs` in the `build_container_config()` method (lines 207-274). The actual Docker `-v` arguments are constructed in `src/docker/container.rs` in the `run_container()` function (lines 89-101).
 
 ## Container Naming
 
@@ -99,20 +104,49 @@ Example: `aoe-sandbox-a1b2c3d4`
 
 1. **Session Creation:** When you add a sandboxed session, aoe records the sandbox configuration
 2. **Container Start:** When you start the session, aoe creates/starts the Docker container with appropriate volume mounts
-3. **tmux + docker exec:** Host tmux runs `docker exec -it <container> claude` (or opencode)
+3. **tmux + docker exec:** Host tmux runs `docker exec -it <container> <tool>` (claude, opencode, vibe, codex, or gemini)
 4. **Cleanup:** When you remove the session, the container is automatically deleted
 
 
 ## Environment Variables
 
-Pass API keys through containers by adding them to config:
+These terminal-related variables are **always** passed through for proper UI/theming:
+- `TERM`, `COLORTERM`, `FORCE_COLOR`, `NO_COLOR`
+
+Pass additional variables (like API keys) through containers by adding them to config:
 
 ```toml
 [sandbox]
-environment = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+environment = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
 ```
 
-These variables are read from your host environment and passed to containers.
+These variables are read from your host environment and passed to containers (in addition to the terminal defaults above).
+
+### Sandbox-Specific Values (`environment_values`)
+
+Use `environment_values` to inject env vars with values that AOE manages directly, independent of your host environment. This is useful for giving sandboxes credentials that differ from (or don't exist on) the host:
+
+```toml
+[sandbox.environment_values]
+GH_TOKEN = "ghp_sandbox_scoped_token"
+CUSTOM_API_KEY = "sk-sandbox-only-key"
+```
+
+Values starting with `$` are read from a host env var instead of being used literally. This lets you store the actual secret in your shell profile rather than in the AOE config file:
+
+```toml
+[sandbox.environment_values]
+GH_TOKEN = "$AOE_GH_TOKEN"   # reads AOE_GH_TOKEN from host, injects as GH_TOKEN
+```
+
+```bash
+# In your .bashrc / .zshrc
+export AOE_GH_TOKEN="ghp_sandbox_scoped_token"
+```
+
+If the referenced host env var is not set, the entry is silently skipped.
+
+To use a literal value starting with `$`, double it: `$$LITERAL` is injected as `$LITERAL`.
 
 ## Available Images
 
@@ -120,7 +154,7 @@ AOE provides two official sandbox images:
 
 | Image | Description |
 |-------|-------------|
-| `ghcr.io/njbrake/aoe-sandbox:latest` | Base image with Claude Code, OpenCode, git, ripgrep, fzf |
+| `ghcr.io/njbrake/aoe-sandbox:latest` | Base image with Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, git, ripgrep, fzf |
 | `ghcr.io/njbrake/aoe-dev-sandbox:latest` | Extended image with additional dev tools |
 
 ### Dev Sandbox Tools
@@ -145,7 +179,7 @@ default_image = "ghcr.io/njbrake/aoe-dev-sandbox:latest"
 
 ## Custom Docker Images
 
-The default sandbox image includes Claude Code, OpenCode, git, and basic development tools. For projects requiring additional dependencies beyond what the dev sandbox provides, you can extend either base image.
+The default sandbox image includes Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, git, and basic development tools. For projects requiring additional dependencies beyond what the dev sandbox provides, you can extend either base image.
 
 ### Step 1: Create a Dockerfile
 
@@ -252,4 +286,4 @@ git fetch origin
 git worktree add main main
 ```
 
-See the [Worktrees Guide](worktrees.md#bare-repo-workflow-recommended-for-sandboxing) for detailed setup instructions.
+See the [Workflow Guide](workflow.md) for detailed bare repo setup instructions.

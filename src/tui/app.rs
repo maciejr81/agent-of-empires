@@ -1,15 +1,54 @@
 //! Main TUI application
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::prelude::*;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use super::home::HomeView;
+use super::home::{HomeView, TerminalMode};
 use super::styles::Theme;
 use crate::session::{get_update_settings, load_config, save_config, Storage};
 use crate::tmux::AvailableTools;
 use crate::update::{check_for_update, UpdateInfo};
+
+/// Temporarily leave TUI mode, run a closure, and restore TUI mode.
+/// Drains stale events and clears the terminal on return.
+fn with_raw_mode_disabled<F, R>(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    f: F,
+) -> Result<R>
+where
+    F: FnOnce() -> R,
+{
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture,
+        crossterm::cursor::Show
+    )?;
+    std::io::Write::flush(terminal.backend_mut())?;
+
+    let result = f();
+
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
+        crossterm::cursor::Hide
+    )?;
+    std::io::Write::flush(terminal.backend_mut())?;
+
+    while event::poll(Duration::from_millis(0))? {
+        let _ = event::read();
+    }
+
+    terminal.clear()?;
+
+    Ok(result)
+}
 
 pub struct App {
     home: HomeView,
@@ -103,16 +142,27 @@ impl App {
 
             // Poll with short timeout for responsive input
             if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key, terminal).await?;
+                match event::read()? {
+                    Event::Key(key) => {
+                        self.handle_key(key, terminal).await?;
 
-                    // Draw immediately after input for responsiveness
-                    terminal.draw(|f| self.render(f))?;
+                        // Draw immediately after input for responsiveness
+                        terminal.draw(|f| self.render(f))?;
 
-                    if self.should_quit {
-                        break;
+                        if self.should_quit {
+                            break;
+                        }
+                        continue; // Skip status refresh this iteration for responsiveness
                     }
-                    continue; // Skip status refresh this iteration for responsiveness
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse(mouse, terminal).await?;
+
+                        // Draw immediately after input for responsiveness
+                        terminal.draw(|f| self.render(f))?;
+
+                        continue;
+                    }
+                    _ => {}
                 }
             }
 
@@ -243,13 +293,45 @@ impl App {
                 Action::AttachSession(id) => {
                     self.attach_session(&id, terminal)?;
                 }
-                Action::AttachTerminal(id) => {
-                    self.attach_terminal(&id, terminal)?;
+                Action::AttachTerminal(id, mode) => {
+                    self.attach_terminal(&id, mode, terminal)?;
                 }
                 Action::SwitchProfile(profile) => {
                     let storage = Storage::new(&profile)?;
                     let tools = self.home.available_tools();
                     self.home = HomeView::new(storage, tools)?;
+                }
+                Action::EditFile(path) => {
+                    self.edit_file(&path, terminal)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        // Delegate to home view
+        if let Some(action) = self.home.handle_mouse(mouse) {
+            match action {
+                Action::Quit => self.should_quit = true,
+                Action::AttachSession(id) => {
+                    self.attach_session(&id, terminal)?;
+                }
+                Action::AttachTerminal(id, mode) => {
+                    self.attach_terminal(&id, mode, terminal)?;
+                }
+                Action::SwitchProfile(profile) => {
+                    let storage = Storage::new(&profile)?;
+                    let tools = self.home.available_tools();
+                    self.home = HomeView::new(storage, tools)?;
+                }
+                Action::EditFile(path) => {
+                    self.edit_file(&path, terminal)?;
                 }
             }
         }
@@ -277,8 +359,11 @@ impl App {
             // This ensures the session starts at the correct size instead of 80x24 default
             let size = crate::terminal::get_size();
 
+            // Skip on_launch hooks if they already ran in the background creation poller
+            let skip_on_launch = self.home.take_on_launch_hooks_ran(session_id);
+
             let mut inst = instance.clone();
-            if let Err(e) = inst.start_with_size(size) {
+            if let Err(e) = inst.start_with_size_opts(size, skip_on_launch) {
                 self.home
                     .set_instance_error(session_id, Some(e.to_string()));
                 return Ok(());
@@ -286,44 +371,13 @@ impl App {
             self.home.set_instance_error(session_id, None);
         }
 
-        // Leave TUI mode completely
-        crossterm::terminal::disable_raw_mode()?;
-        crossterm::execute!(
-            terminal.backend_mut(),
-            crossterm::terminal::LeaveAlternateScreen,
-            crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show
-        )?;
-        std::io::Write::flush(terminal.backend_mut())?;
+        let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach())?;
 
-        // Attach to tmux session (this blocks until user detaches with Ctrl+b d)
-        let attach_result = tmux_session.attach();
-
-        // Re-enter TUI mode
-        crossterm::terminal::enable_raw_mode()?;
-        crossterm::execute!(
-            terminal.backend_mut(),
-            crossterm::terminal::EnterAlternateScreen,
-            crossterm::event::EnableMouseCapture,
-            crossterm::cursor::Hide
-        )?;
-        std::io::Write::flush(terminal.backend_mut())?;
-
-        // Drain any stale events that accumulated during tmux session
-        while event::poll(Duration::from_millis(0))? {
-            let _ = event::read();
-        }
-
-        // Force terminal to clear and redraw completely
-        terminal.clear()?;
         self.needs_redraw = true;
-
-        // Refresh session state since things may have changed
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
         self.home.select_session_by_id(session_id);
 
-        // Log any attach errors but don't fail
         if let Err(e) = attach_result {
             tracing::warn!("tmux attach returned error: {}", e);
         }
@@ -334,6 +388,7 @@ impl App {
     fn attach_terminal(
         &mut self,
         session_id: &str,
+        mode: TerminalMode,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         let instance = match self.home.get_instance(session_id) {
@@ -344,64 +399,107 @@ impl App {
         // Update last_accessed_at timestamp
         self.home.update_last_accessed(session_id);
 
-        let terminal_session = instance.terminal_tmux_session()?;
+        // Get terminal size to pass to tmux session creation
+        let size = crate::terminal::get_size();
 
-        if !terminal_session.exists() {
-            // Get terminal size to pass to tmux session creation
-            // This ensures the session starts at the correct size instead of 80x24 default
-            let size = crate::terminal::get_size();
-
-            // Start the terminal (creates tmux session and updates terminal_info)
-            if let Err(e) = self
-                .home
-                .start_terminal_for_instance_with_size(session_id, size)
-            {
-                self.home
-                    .set_instance_error(session_id, Some(e.to_string()));
-                return Ok(());
+        // Prepare the tmux session before leaving TUI mode
+        let attach_fn: Box<dyn FnOnce() -> Result<()>> = match mode {
+            TerminalMode::Container if instance.is_sandboxed() => {
+                let container_session = instance.container_terminal_tmux_session()?;
+                if !container_session.exists() {
+                    if let Err(e) = self
+                        .home
+                        .start_container_terminal_for_instance_with_size(session_id, size)
+                    {
+                        self.home
+                            .set_instance_error(session_id, Some(e.to_string()));
+                        return Ok(());
+                    }
+                }
+                Box::new(move || container_session.attach())
             }
-        }
+            _ => {
+                let terminal_session = instance.terminal_tmux_session()?;
+                if !terminal_session.exists() {
+                    if let Err(e) = self
+                        .home
+                        .start_terminal_for_instance_with_size(session_id, size)
+                    {
+                        self.home
+                            .set_instance_error(session_id, Some(e.to_string()));
+                        return Ok(());
+                    }
+                }
+                Box::new(move || terminal_session.attach())
+            }
+        };
 
-        // Leave TUI mode completely
-        crossterm::terminal::disable_raw_mode()?;
-        crossterm::execute!(
-            terminal.backend_mut(),
-            crossterm::terminal::LeaveAlternateScreen,
-            crossterm::event::DisableMouseCapture,
-            crossterm::cursor::Show
-        )?;
-        std::io::Write::flush(terminal.backend_mut())?;
+        let attach_result = with_raw_mode_disabled(terminal, attach_fn)?;
 
-        // Attach to terminal session (this blocks until user detaches with Ctrl+b d)
-        let attach_result = terminal_session.attach();
-
-        // Re-enter TUI mode
-        crossterm::terminal::enable_raw_mode()?;
-        crossterm::execute!(
-            terminal.backend_mut(),
-            crossterm::terminal::EnterAlternateScreen,
-            crossterm::event::EnableMouseCapture,
-            crossterm::cursor::Hide
-        )?;
-        std::io::Write::flush(terminal.backend_mut())?;
-
-        // Drain any stale events that accumulated during tmux session
-        while event::poll(Duration::from_millis(0))? {
-            let _ = event::read();
-        }
-
-        // Force terminal to clear and redraw completely
-        terminal.clear()?;
         self.needs_redraw = true;
-
-        // Refresh session state since things may have changed
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
         self.home.select_session_by_id(session_id);
 
-        // Log any attach errors but don't fail
         if let Err(e) = attach_result {
             tracing::warn!("tmux terminal attach returned error: {}", e);
+        }
+
+        Ok(())
+    }
+
+    fn edit_file(
+        &mut self,
+        path: &std::path::Path,
+        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<()> {
+        // Determine which editor to use (prefer vim, fall back to nano)
+        let editor = std::env::var("EDITOR")
+            .ok()
+            .or_else(|| {
+                // Check if vim is available
+                if std::process::Command::new("vim")
+                    .arg("--version")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok()
+                {
+                    Some("vim".to_string())
+                } else if std::process::Command::new("nano")
+                    .arg("--version")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok()
+                {
+                    Some("nano".to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "vim".to_string());
+
+        let path = path.to_owned();
+        let editor_clone = editor.clone();
+        let status = with_raw_mode_disabled(terminal, move || {
+            std::process::Command::new(&editor_clone)
+                .arg(&path)
+                .status()
+        })?;
+
+        self.needs_redraw = true;
+
+        // Refresh diff view if it's open (file may have changed)
+        if let Some(ref mut diff_view) = self.home.diff_view {
+            if let Err(e) = diff_view.refresh_files() {
+                tracing::warn!("Failed to refresh diff after edit: {}", e);
+            }
+        }
+
+        // Log any editor errors but don't fail
+        if let Err(e) = status {
+            tracing::warn!("Editor '{}' returned error: {}", editor, e);
         }
 
         Ok(())
@@ -412,8 +510,9 @@ impl App {
 pub enum Action {
     Quit,
     AttachSession(String),
-    AttachTerminal(String),
+    AttachTerminal(String, TerminalMode),
     SwitchProfile(String),
+    EditFile(PathBuf),
 }
 
 #[cfg(test)]
@@ -424,9 +523,15 @@ mod tests {
     fn test_action_enum() {
         let quit = Action::Quit;
         let attach = Action::AttachSession("test-id".to_string());
+        let attach_terminal =
+            Action::AttachTerminal("test-id".to_string(), TerminalMode::Container);
 
         assert_eq!(quit, Action::Quit);
         assert_eq!(attach, Action::AttachSession("test-id".to_string()));
+        assert_eq!(
+            attach_terminal,
+            Action::AttachTerminal("test-id".to_string(), TerminalMode::Container)
+        );
     }
 
     #[test]
@@ -434,6 +539,10 @@ mod tests {
         let original = Action::AttachSession("session-123".to_string());
         let cloned = original.clone();
         assert_eq!(original, cloned);
+
+        let terminal_action = Action::AttachTerminal("session-123".to_string(), TerminalMode::Host);
+        let terminal_cloned = terminal_action.clone();
+        assert_eq!(terminal_action, terminal_cloned);
     }
 
     #[test]

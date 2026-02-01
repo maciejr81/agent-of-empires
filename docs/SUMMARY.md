@@ -7,16 +7,19 @@
 - [Installation](installation.md)
 - [Quick Start](quick-start.md)
 
+# Guides
+
+- [Workflow](guides/workflow.md)
+- [Docker Sandbox](guides/sandbox.md)
+- [Repo Config & Hooks](guides/repo-config.md)
+- [Git Worktrees](guides/worktrees.md)
+- [Diff View](guides/diff-view.md)
+- [tmux Status Bar](guides/tmux-status-bar.md)
+
 # Reference
 
 - [CLI Reference](cli/reference.md)
-
-# Guides
-
-- [Git Worktrees](guides/worktrees.md)
-- [Two-Terminal Workflow](guides/two-terminal-workflow.md)
-- [Docker Sandbox](guides/sandbox.md)
-- [tmux Status Bar](guides/tmux-status-bar.md)
+- [Configuration Reference](guides/configuration.md)
 
 # Contributing
 

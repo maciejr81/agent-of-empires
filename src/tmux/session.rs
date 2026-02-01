@@ -3,8 +3,6 @@
 use anyhow::{bail, Result};
 use std::process::Command;
 
-use super::status_detection::detect_status_from_content;
-use super::utils::sanitize_session_name;
 use super::{refresh_session_cache, session_exists_from_cache, SESSION_PREFIX};
 use crate::cli::truncate_id;
 use crate::process;
@@ -60,7 +58,7 @@ impl Session {
             bail!("Failed to create tmux session: {}", stderr);
         }
 
-        refresh_session_cache();
+        super::refresh_session_cache();
 
         Ok(())
     }
@@ -188,8 +186,23 @@ impl Session {
     pub fn detect_status(&self, tool: &str) -> Result<Status> {
         let content = self.capture_pane(50)?;
         let fg_pid = self.get_foreground_pid();
-        Ok(detect_status_from_content(&content, tool, fg_pid))
+        Ok(super::status_detection::detect_status_from_content(
+            &content, tool, fg_pid,
+        ))
     }
+}
+
+fn sanitize_session_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(20)
+        .collect()
 }
 
 /// Build the argument list for tmux new-session command.
@@ -228,34 +241,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_sanitize_session_name() {
+        assert_eq!(sanitize_session_name("my-project"), "my-project");
+        assert_eq!(sanitize_session_name("my project"), "my_project");
+        assert_eq!(sanitize_session_name("a".repeat(30).as_str()).len(), 20);
+    }
+
+    #[test]
     fn test_generate_name() {
         let name = Session::generate_name("abc123def456", "My Project");
         assert!(name.starts_with(SESSION_PREFIX));
         assert!(name.contains("My_Project"));
         assert!(name.contains("abc123de"));
-    }
-
-    #[test]
-    fn test_generate_name_with_long_title() {
-        let name = Session::generate_name(
-            "abc123",
-            "This is a very long project name that exceeds the limit",
-        );
-        assert!(name.len() < 50);
-        assert!(name.starts_with(SESSION_PREFIX));
-    }
-
-    #[test]
-    fn test_generate_name_with_short_id() {
-        let name = Session::generate_name("abc", "Test");
-        assert!(name.contains("abc"));
-    }
-
-    #[test]
-    fn test_generate_name_consistency() {
-        let name1 = Session::generate_name("test123", "Project");
-        let name2 = Session::generate_name("test123", "Project");
-        assert_eq!(name1, name2);
     }
 
     #[test]

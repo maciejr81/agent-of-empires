@@ -3,6 +3,7 @@
 //! This module provides shared logic for building new session instances,
 //! used by both synchronous (TUI operations) and asynchronous (background poller) code paths.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
@@ -26,6 +27,10 @@ pub struct InstanceParams {
     /// The sandbox image to use. Required when sandbox is true.
     pub sandbox_image: String,
     pub yolo_mode: bool,
+    /// Additional environment variable keys to pass from host to container.
+    pub extra_env_keys: Vec<String>,
+    /// Additional KEY=VALUE environment variables to inject into the container.
+    pub extra_env_values: Vec<String>,
 }
 
 /// Result of building an instance, tracking what was created for cleanup purposes.
@@ -76,7 +81,8 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
         let git_wt = GitWorktree::new(main_repo_path.clone())?;
 
         // Choose appropriate template based on repo type (bare vs regular)
-        let is_bare = GitWorktree::is_bare_repo(&path);
+        // Use main_repo_path (not path) to correctly detect bare repos when running from a worktree
+        let is_bare = GitWorktree::is_bare_repo(&main_repo_path);
         let template = if is_bare {
             &config.worktree.bare_repo_path_template
         } else {
@@ -165,6 +171,27 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
             container_name: DockerContainer::generate_name(&instance.id),
             created_at: None,
             yolo_mode: if params.yolo_mode { Some(true) } else { None },
+            extra_env_keys: if params.extra_env_keys.is_empty() {
+                None
+            } else {
+                Some(params.extra_env_keys.clone())
+            },
+            extra_env_values: {
+                let map: HashMap<String, String> = params
+                    .extra_env_values
+                    .iter()
+                    .filter_map(|entry| {
+                        entry
+                            .split_once('=')
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                    })
+                    .collect();
+                if map.is_empty() {
+                    None
+                } else {
+                    Some(map)
+                }
+            },
         });
     }
 
