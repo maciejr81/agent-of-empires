@@ -828,57 +828,11 @@ impl HomeView {
         }
     }
 
-    /// Update filter to show only user_active sessions and their parent groups
+    /// Update filter to show only user_active sessions and their parent groups.
+    /// Rebuilds flat_items to include only matching items.
     pub(super) fn update_user_active_filter(&mut self) {
-        if !self.filter_user_active {
-            self.filtered_items = None;
-            self.cursor = 0;
-            self.update_selected();
-            return;
-        }
-
-        // First, find all active session IDs
-        let active_session_ids: std::collections::HashSet<String> = self
-            .instances
-            .iter()
-            .filter(|i| i.user_active)
-            .map(|i| i.id.clone())
-            .collect();
-
-        // Find all group paths that contain active sessions
-        let active_group_paths: std::collections::HashSet<String> = self
-            .instances
-            .iter()
-            .filter(|i| i.user_active && !i.group_path.is_empty())
-            .flat_map(|i| {
-                // Include all parent groups
-                let mut paths = Vec::new();
-                let parts: Vec<&str> = i.group_path.split('/').collect();
-                for n in 1..=parts.len() {
-                    paths.push(parts[..n].join("/"));
-                }
-                paths
-            })
-            .collect();
-
-        let mut matches = Vec::new();
-
-        for (idx, item) in self.flat_items.iter().enumerate() {
-            match item {
-                Item::Session { id, .. } => {
-                    if active_session_ids.contains(id) {
-                        matches.push(idx);
-                    }
-                }
-                Item::Group { path, .. } => {
-                    if active_group_paths.contains(path) {
-                        matches.push(idx);
-                    }
-                }
-            }
-        }
-
-        self.filtered_items = Some(matches);
+        // Always rebuild from scratch first, then apply filter if active
+        self.rebuild_flat_items();
         self.cursor = 0;
         self.update_selected();
     }

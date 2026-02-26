@@ -141,7 +141,6 @@ pub struct HomeView {
 
     // Filter by user_active
     pub(super) filter_user_active: bool,
-    pub(super) filtered_items: Option<Vec<usize>>,
 
     // Sort and display options
     pub(super) sort_mode: SortMode,
@@ -242,7 +241,6 @@ impl HomeView {
             search_query: Input::default(),
             search_matches: Vec::new(),
             search_match_index: 0,
-            filtered_items: None,
             filter_user_active: false,
             sort_mode: SortMode::default(),
             show_groups: true,
@@ -319,9 +317,6 @@ impl HomeView {
 
     /// Rebuild flat_items based on current sort_mode and show_groups settings
     pub(super) fn rebuild_flat_items(&mut self) {
-        // Clear any existing filter - will be reapplied if needed
-        self.filtered_items = None;
-
         if self.show_groups {
             // With groups - use standard flatten_tree, then sort within groups if needed
             self.flat_items = flatten_tree(&self.group_tree, &self.instances);
@@ -361,9 +356,31 @@ impl HomeView {
             }
         }
 
-        // Reapply user_active filter if active
+        // Apply user_active filter: retain only active sessions and their parent groups
         if self.filter_user_active {
-            self.update_user_active_filter();
+            let active_ids: std::collections::HashSet<&str> = self
+                .instances
+                .iter()
+                .filter(|i| i.user_active)
+                .map(|i| i.id.as_str())
+                .collect();
+
+            let active_group_paths: std::collections::HashSet<String> = self
+                .instances
+                .iter()
+                .filter(|i| i.user_active && !i.group_path.is_empty())
+                .flat_map(|i| {
+                    let parts: Vec<&str> = i.group_path.split('/').collect();
+                    (1..=parts.len())
+                        .map(|n| parts[..n].join("/"))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            self.flat_items.retain(|item| match item {
+                Item::Session { id, .. } => active_ids.contains(id.as_str()),
+                Item::Group { path, .. } => active_group_paths.contains(path),
+            });
         }
     }
 
@@ -754,18 +771,8 @@ impl HomeView {
             return;
         };
 
-        // If we have a filter active, find the cursor position in the filtered list
-        if let Some(ref filtered) = self.filtered_items {
-            if let Some(cursor_pos) = filtered.iter().position(|&idx| idx == flat_idx) {
-                self.cursor = cursor_pos;
-                self.update_selected();
-            }
-            // If session not in filtered list, don't change cursor
-        } else {
-            // No filter - use flat_items index directly
-            self.cursor = flat_idx;
-            self.update_selected();
-        }
+        self.cursor = flat_idx;
+        self.update_selected();
     }
 
     /// Get the terminal mode for a session (uses config default if not set)
