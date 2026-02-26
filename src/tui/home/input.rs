@@ -5,6 +5,7 @@ use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::{HomeView, TerminalMode, ViewMode};
+use crate::session::config::{load_config, save_config};
 use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
@@ -835,6 +836,14 @@ impl HomeView {
         self.rebuild_flat_items();
         self.cursor = 0;
         self.update_selected();
+        self.save_filter_user_active();
+    }
+
+    fn save_filter_user_active(&self) {
+        if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
+            config.app_state.filter_user_active = self.filter_user_active;
+            let _ = save_config(&config);
+        }
     }
 
     /// Create a session with optional hooks. Delegates to the background

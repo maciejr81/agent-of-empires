@@ -63,6 +63,9 @@ pub struct AppStateConfig {
 
     #[serde(default)]
     pub has_seen_custom_instruction_warning: bool,
+
+    #[serde(default)]
+    pub filter_user_active: bool,
 }
 
 /// Session-related configuration defaults

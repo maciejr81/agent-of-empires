@@ -241,7 +241,11 @@ impl HomeView {
             search_query: Input::default(),
             search_matches: Vec::new(),
             search_match_index: 0,
-            filter_user_active: false,
+            filter_user_active: load_config()
+                .ok()
+                .flatten()
+                .map(|c| c.app_state.filter_user_active)
+                .unwrap_or(false),
             sort_mode: SortMode::default(),
             show_groups: true,
             available_tools,

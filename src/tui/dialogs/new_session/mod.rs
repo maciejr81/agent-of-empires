@@ -46,7 +46,7 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     },
     FieldHelp {
         name: "Worktree Branch",
-        description: "Branch name for git worktree (Ctrl+P to browse existing branches)",
+        description: "Branch name for git worktree (Ctrl+O to browse existing branches)",
     },
     FieldHelp {
         name: "New Branch",
@@ -75,7 +75,7 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     },
     FieldHelp {
         name: "Group",
-        description: "Optional grouping for organization (Ctrl+P to browse existing groups)",
+        description: "Optional grouping for organization (Ctrl+O to browse existing groups)",
     },
 ];
 
@@ -789,8 +789,8 @@ impl NewSessionDialog {
             return self.handle_env_values_list_key(key);
         }
 
-        // Ctrl+P opens a context-sensitive picker
-        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+O opens a context-sensitive picker
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.focused_field == 1 {
                 let path_value = self.path.value().trim().to_string();
                 self.dir_picker.activate(&path_value);

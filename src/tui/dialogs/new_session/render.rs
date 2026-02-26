@@ -108,7 +108,7 @@ impl NewSessionDialog {
 
         // Title, Path (always visible)
         let path_placeholder = if self.focused_field == 1 {
-            Some("(Ctrl+P to browse directories)")
+            Some("(Ctrl+O to browse directories)")
         } else {
             None
         };
@@ -207,7 +207,7 @@ impl NewSessionDialog {
 
         // Worktree Branch (always visible)
         let worktree_placeholder = if self.focused_field == worktree_field {
-            Some("(leave empty to skip | Ctrl+P to browse branches)")
+            Some("(leave empty to skip | Ctrl+O to browse branches)")
         } else {
             Some("(leave empty to skip worktree)")
         };
@@ -337,7 +337,7 @@ impl NewSessionDialog {
         let group_field = next_field_idx;
         let group_placeholder =
             if !self.existing_groups.is_empty() && self.focused_field == group_field {
-                Some("(Ctrl+P to browse groups)")
+                Some("(Ctrl+O to browse groups)")
             } else {
                 None
             };
