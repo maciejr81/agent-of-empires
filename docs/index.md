@@ -1,5 +1,7 @@
 # Agent of Empires
 
+[![YouTube](https://img.shields.io/badge/YouTube-channel-red?logo=youtube)](https://www.youtube.com/@agent-of-empires)
+
 A terminal session manager for AI coding agents on Linux and macOS, built on tmux and written in Rust.
 
 AoE lets you run multiple AI agents in parallel -- each in its own tmux session, optionally on its own git branch, optionally inside a Docker container. A TUI dashboard shows you what every agent is doing at a glance.
@@ -8,7 +10,7 @@ AoE lets you run multiple AI agents in parallel -- each in its own tmux session,
 
 ## Why AoE?
 
-**The problem:** You're working with AI coding agents (Claude Code, OpenCode, Codex, etc.) and want to run several in parallel across different tasks or branches. Managing multiple terminal windows, git branches, and container lifecycles by hand gets tedious fast.
+**The problem:** You're working with AI coding agents (Claude Code, OpenCode, Cursor, Codex, etc.) and want to run several in parallel across different tasks or branches. Managing multiple terminal windows, git branches, and container lifecycles by hand gets tedious fast.
 
 **AoE handles it for you:**
 
@@ -20,29 +22,9 @@ AoE lets you run multiple AI agents in parallel -- each in its own tmux session,
 
 ## Supported Agents
 
-Claude Code, OpenCode, Mistral Vibe, Codex CLI, and Gemini CLI. AoE auto-detects which are installed.
+Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, and Cursor CLI. AoE auto-detects which are installed.
 
-## Documentation
-
-### Getting Started
-
-- [Installation](installation.md) -- prerequisites and install methods
-- [Quick Start](quick-start.md) -- create your first session in under a minute
-
-### Guides
-
-- [Workflow Guide](guides/workflow.md) -- recommended setup with bare repos and worktrees
-- [Docker Sandbox](guides/sandbox.md) -- container isolation, images, and volume mounts
-- [Repo Config & Hooks](guides/repo-config.md) -- per-project settings and automation
-- [Git Worktrees](guides/worktrees.md) -- branch management and worktree templates
-- [Diff View](guides/diff-view.md) -- review and edit git changes in the TUI
-- [tmux Status Bar](guides/tmux-status-bar.md) -- session info in your tmux status line
-
-### Reference
-
-- [CLI Reference](cli/reference.md) -- every command and flag
-- [Configuration Reference](guides/configuration.md) -- all config options (global, profile, repo-level)
-
-### Contributing
-
-- [Development](development.md) -- building, testing, and generating demo assets
+<div class="cta-box">
+<p><strong>Ready to get started?</strong></p>
+<p><a href="installation.html">Install AoE</a></p>
+</div>

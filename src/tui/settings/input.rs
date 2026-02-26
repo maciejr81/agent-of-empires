@@ -4,6 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
+use crate::tui::dialogs::{CustomInstructionDialog, DialogResult};
+
 use super::{FieldKey, FieldValue, ListEditState, SettingsFocus, SettingsScope, SettingsView};
 
 /// Result of handling a key event in the settings view
@@ -14,12 +16,36 @@ pub enum SettingsAction {
     Close,
     /// Close was cancelled due to unsaved changes
     UnsavedChangesWarning,
+    /// Live-preview a theme change (theme name)
+    PreviewTheme(String),
 }
 
 impl SettingsView {
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         // Clear transient messages on any key
         self.success_message = None;
+
+        // Handle custom instruction dialog
+        if let Some(ref mut dialog) = self.custom_instruction_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Submit(value) => {
+                    let field = &mut self.fields[self.selected_field];
+                    if let FieldValue::OptionalText(ref mut v) = field.value {
+                        *v = value;
+                    }
+                    self.apply_field_to_config(self.selected_field);
+                    self.custom_instruction_dialog = None;
+                    return SettingsAction::Continue;
+                }
+                DialogResult::Cancel => {
+                    self.custom_instruction_dialog = None;
+                    return SettingsAction::Continue;
+                }
+                DialogResult::Continue => {
+                    return SettingsAction::Continue;
+                }
+            }
+        }
 
         // Handle text editing mode
         if self.editing_input.is_some() {
@@ -51,10 +77,32 @@ impl SettingsView {
             }
 
             // Switch scope tabs
-            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
+            (KeyCode::Tab, _) => {
                 self.scope = match self.scope {
                     SettingsScope::Global => SettingsScope::Profile,
+                    SettingsScope::Profile => {
+                        if self.project_path.is_some() {
+                            SettingsScope::Repo
+                        } else {
+                            SettingsScope::Global
+                        }
+                    }
+                    SettingsScope::Repo => SettingsScope::Global,
+                };
+                self.rebuild_fields();
+                SettingsAction::Continue
+            }
+            (KeyCode::BackTab, _) => {
+                self.scope = match self.scope {
+                    SettingsScope::Global => {
+                        if self.project_path.is_some() {
+                            SettingsScope::Repo
+                        } else {
+                            SettingsScope::Profile
+                        }
+                    }
                     SettingsScope::Profile => SettingsScope::Global,
+                    SettingsScope::Repo => SettingsScope::Profile,
                 };
                 self.rebuild_fields();
                 SettingsAction::Continue
@@ -124,7 +172,6 @@ impl SettingsView {
                     let field = &self.fields[self.selected_field];
                     match &field.value {
                         FieldValue::Bool(value) => {
-                            // Toggle boolean on Enter too
                             let new_value = !value;
                             self.fields[self.selected_field].value = FieldValue::Bool(new_value);
                             self.apply_field_to_config(self.selected_field);
@@ -133,20 +180,35 @@ impl SettingsView {
                             self.editing_input = Some(Input::new(value.clone()));
                         }
                         FieldValue::OptionalText(value) => {
-                            self.editing_input =
-                                Some(Input::new(value.clone().unwrap_or_default()));
+                            if field.key == FieldKey::CustomInstruction {
+                                self.custom_instruction_dialog =
+                                    Some(CustomInstructionDialog::new(value.clone()));
+                            } else {
+                                self.editing_input =
+                                    Some(Input::new(value.clone().unwrap_or_default()));
+                            }
                         }
                         FieldValue::Number(value) => {
                             self.editing_input = Some(Input::new(value.to_string()));
                         }
                         FieldValue::Select { selected, options } => {
-                            // Cycle through options
                             let new_selected = (*selected + 1) % options.len();
+                            let new_options = options.clone();
                             self.fields[self.selected_field].value = FieldValue::Select {
                                 selected: new_selected,
-                                options: options.clone(),
+                                options: new_options,
                             };
                             self.apply_field_to_config(self.selected_field);
+
+                            if self.fields[self.selected_field].key == FieldKey::ThemeName {
+                                if let FieldValue::Select { selected, options } =
+                                    &self.fields[self.selected_field].value
+                                {
+                                    if let Some(name) = options.get(*selected) {
+                                        return SettingsAction::PreviewTheme(name.clone());
+                                    }
+                                }
+                            }
                         }
                         FieldValue::List(_) => {
                             // Expand list for editing
@@ -160,14 +222,27 @@ impl SettingsView {
                 SettingsAction::Continue
             }
 
-            // Reset field to default (clear profile override)
+            // Reset field to default (clear profile/repo override)
             (KeyCode::Char('r'), _) => {
-                if self.scope == SettingsScope::Profile
+                if (self.scope == SettingsScope::Profile || self.scope == SettingsScope::Repo)
                     && self.focus == SettingsFocus::Fields
                     && !self.fields.is_empty()
                 {
+                    let was_theme = self.fields[self.selected_field].key == FieldKey::ThemeName;
                     self.clear_profile_override(self.selected_field);
                     self.rebuild_fields();
+
+                    if was_theme {
+                        if let Some(field) =
+                            self.fields.iter().find(|f| f.key == FieldKey::ThemeName)
+                        {
+                            if let FieldValue::Select { selected, options } = &field.value {
+                                if let Some(name) = options.get(*selected) {
+                                    return SettingsAction::PreviewTheme(name.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 SettingsAction::Continue
             }
@@ -282,7 +357,6 @@ impl SettingsView {
                     }
                 }
 
-                // Update state and apply config after releasing borrows
                 if let Some(ref mut s) = self.list_edit_state {
                     s.selected_index = new_selected_idx;
                 }
@@ -355,103 +429,199 @@ impl SettingsView {
 
         let key = self.fields[field_index].key;
 
+        // Pick the right ProfileConfig to clear from based on scope
+        let config = if self.scope == SettingsScope::Repo {
+            &mut self.repo_as_profile
+        } else {
+            &mut self.profile_config
+        };
+
         match key {
+            // Theme
+            FieldKey::ThemeName => {
+                if let Some(ref mut t) = config.theme {
+                    t.name = None;
+                }
+            }
             // Updates
             FieldKey::CheckEnabled => {
-                if let Some(ref mut u) = self.profile_config.updates {
+                if let Some(ref mut u) = config.updates {
                     u.check_enabled = None;
                 }
             }
             FieldKey::CheckIntervalHours => {
-                if let Some(ref mut u) = self.profile_config.updates {
+                if let Some(ref mut u) = config.updates {
                     u.check_interval_hours = None;
                 }
             }
             FieldKey::NotifyInCli => {
-                if let Some(ref mut u) = self.profile_config.updates {
+                if let Some(ref mut u) = config.updates {
                     u.notify_in_cli = None;
                 }
             }
             // Worktree
             FieldKey::PathTemplate => {
-                if let Some(ref mut w) = self.profile_config.worktree {
+                if let Some(ref mut w) = config.worktree {
                     w.path_template = None;
                 }
             }
             FieldKey::BareRepoPathTemplate => {
-                if let Some(ref mut w) = self.profile_config.worktree {
+                if let Some(ref mut w) = config.worktree {
                     w.bare_repo_path_template = None;
                 }
             }
             FieldKey::WorktreeAutoCleanup => {
-                if let Some(ref mut w) = self.profile_config.worktree {
+                if let Some(ref mut w) = config.worktree {
                     w.auto_cleanup = None;
                 }
             }
             FieldKey::DeleteBranchOnCleanup => {
-                if let Some(ref mut w) = self.profile_config.worktree {
+                if let Some(ref mut w) = config.worktree {
                     w.delete_branch_on_cleanup = None;
                 }
             }
             // Sandbox
             FieldKey::DefaultImage => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.sandbox {
                     s.default_image = None;
                 }
             }
             FieldKey::Environment => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.sandbox {
                     s.environment = None;
                 }
             }
             FieldKey::EnvironmentValues => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.sandbox {
                     s.environment_values = None;
                 }
             }
             FieldKey::SandboxAutoCleanup => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.sandbox {
                     s.auto_cleanup = None;
                 }
             }
             // Tmux
             FieldKey::StatusBar => {
-                if let Some(ref mut t) = self.profile_config.tmux {
+                if let Some(ref mut t) = config.tmux {
                     t.status_bar = None;
                 }
             }
             FieldKey::Mouse => {
-                if let Some(ref mut t) = self.profile_config.tmux {
+                if let Some(ref mut t) = config.tmux {
                     t.mouse = None;
                 }
             }
             // Session
             FieldKey::DefaultTool => {
-                if let Some(ref mut s) = self.profile_config.session {
+                if let Some(ref mut s) = config.session {
                     s.default_tool = None;
                 }
             }
-            // New sandbox settings
             FieldKey::SandboxEnabledByDefault => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.sandbox {
                     s.enabled_by_default = None;
                 }
             }
             FieldKey::YoloModeDefault => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.session {
                     s.yolo_mode_default = None;
                 }
             }
             FieldKey::DefaultTerminalMode => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.sandbox {
                     s.default_terminal_mode = None;
                 }
             }
+            FieldKey::ExtraVolumes => {
+                if let Some(ref mut s) = config.sandbox {
+                    s.extra_volumes = None;
+                }
+            }
             FieldKey::VolumeIgnores => {
-                if let Some(ref mut s) = self.profile_config.sandbox {
+                if let Some(ref mut s) = config.sandbox {
                     s.volume_ignores = None;
                 }
             }
+            FieldKey::MountSsh => {
+                if let Some(ref mut s) = config.sandbox {
+                    s.mount_ssh = None;
+                }
+            }
+            FieldKey::CpuLimit => {
+                if let Some(ref mut s) = config.sandbox {
+                    s.cpu_limit = None;
+                }
+            }
+            FieldKey::MemoryLimit => {
+                if let Some(ref mut s) = config.sandbox {
+                    s.memory_limit = None;
+                }
+            }
+            FieldKey::CustomInstruction => {
+                if let Some(ref mut s) = config.sandbox {
+                    s.custom_instruction = None;
+                }
+            }
+            FieldKey::ContainerRuntime => {
+                if let Some(ref mut s) = config.sandbox {
+                    s.container_runtime = None;
+                }
+            }
+            // Sound
+            FieldKey::SoundEnabled => {
+                if let Some(ref mut s) = config.sound {
+                    s.enabled = None;
+                }
+            }
+            FieldKey::SoundMode => {
+                if let Some(ref mut s) = config.sound {
+                    s.mode = None;
+                }
+            }
+            FieldKey::SoundOnStart => {
+                if let Some(ref mut s) = config.sound {
+                    s.on_start = None;
+                }
+            }
+            FieldKey::SoundOnRunning => {
+                if let Some(ref mut s) = config.sound {
+                    s.on_running = None;
+                }
+            }
+            FieldKey::SoundOnWaiting => {
+                if let Some(ref mut s) = config.sound {
+                    s.on_waiting = None;
+                }
+            }
+            FieldKey::SoundOnIdle => {
+                if let Some(ref mut s) = config.sound {
+                    s.on_idle = None;
+                }
+            }
+            FieldKey::SoundOnError => {
+                if let Some(ref mut s) = config.sound {
+                    s.on_error = None;
+                }
+            }
+            // Hooks
+            FieldKey::HookOnCreate => {
+                if let Some(ref mut h) = config.hooks {
+                    h.on_create = None;
+                }
+            }
+            FieldKey::HookOnLaunch => {
+                if let Some(ref mut h) = config.hooks {
+                    h.on_launch = None;
+                }
+            }
+        }
+
+        // Sync repo_config when in Repo scope
+        if self.scope == SettingsScope::Repo {
+            self.repo_config = Some(crate::session::profile_to_repo_config(
+                &self.repo_as_profile,
+            ));
         }
 
         self.has_changes = true;
@@ -466,6 +636,18 @@ impl SettingsView {
     pub fn discard_changes(&mut self) -> anyhow::Result<()> {
         self.global_config = crate::session::Config::load()?;
         self.profile_config = crate::session::load_profile_config(&self.profile)?;
+        self.repo_config = self.project_path.as_ref().and_then(|p| {
+            crate::session::load_repo_config(std::path::Path::new(p))
+                .ok()
+                .flatten()
+        });
+        self.resolved_base =
+            crate::session::merge_configs(self.global_config.clone(), &self.profile_config);
+        self.repo_as_profile = self
+            .repo_config
+            .as_ref()
+            .map(crate::session::repo_config_to_profile)
+            .unwrap_or_default();
         self.has_changes = false;
         self.rebuild_fields();
         Ok(())

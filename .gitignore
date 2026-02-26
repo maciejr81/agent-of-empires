@@ -1,9 +1,8 @@
-# Claude artifacts like ralph loop stuff
-.claude/
+# Claude artifacts (allow .claude/skills/ for cross-agent skills)
+.claude/*
+!.claude/skills/
 # Rust build artifacts
 /target/
-Cargo.lock
-
 # Documentation build output
 /book/
 
@@ -40,12 +39,18 @@ Thumbs.db
 
 # AI coding tools
 .opencode/
+.sisyphus/
 
 # Per-repo aoe config (created by `aoe init`, should be committed per-repo by users)
 # Ignored here since this is the aoe tool repo itself
 .aoe/
 
+# Spec Kit
+.genreleases/
+sdd-*/
+
 # Personal/local files
 *.screenstudio/
 
 debug.log
+website/.next/

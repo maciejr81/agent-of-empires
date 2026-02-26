@@ -6,7 +6,7 @@ use ratatui::widgets::*;
 use crate::tui::styles::Theme;
 
 const DIALOG_WIDTH: u16 = 50;
-const DIALOG_HEIGHT: u16 = 34;
+const DIALOG_HEIGHT: u16 = 35;
 #[cfg(test)]
 const BORDER_HEIGHT: u16 = 2;
 #[cfg(test)]
@@ -32,6 +32,7 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             vec![
                 ("Enter", "Attach to session"),
                 ("n", "New session"),
+                ("x", "Stop session"),
                 ("d", "Delete session/group"),
                 ("r", "Rename session"),
                 ("a", "Toggle user-active marker"),
@@ -53,6 +54,7 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             "Other",
             vec![
                 ("/", "Search"),
+                ("n/N", "Next/prev match"),
                 ("s", "Settings"),
                 ("P", "Next profile"),
                 ("?", "Toggle help"),
@@ -89,12 +91,16 @@ impl HelpOverlay {
 
         frame.render_widget(Clear, dialog_area);
 
+        let version = format!(" v{} ", env!("CARGO_PKG_VERSION"));
         let block = Block::default()
             .style(Style::default().bg(theme.background))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border))
-            .title(" Keyboard Shortcuts ")
-            .title_style(Style::default().fg(theme.title).bold());
+            .title(Line::styled(
+                " Keyboard Shortcuts ",
+                Style::default().fg(theme.title).bold(),
+            ))
+            .title_bottom(Line::styled(version, Style::default().fg(theme.dimmed)).right_aligned());
 
         let inner = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);

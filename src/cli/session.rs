@@ -23,6 +23,9 @@ pub enum SessionCommands {
     /// Show session details
     Show(ShowArgs),
 
+    /// Rename a session
+    Rename(RenameArgs),
+
     /// Auto-detect current session
     Current(CurrentArgs),
 }
@@ -31,6 +34,20 @@ pub enum SessionCommands {
 pub struct SessionIdArgs {
     /// Session ID or title
     identifier: String,
+}
+
+#[derive(Args)]
+pub struct RenameArgs {
+    /// Session ID or title (optional, auto-detects in tmux)
+    identifier: Option<String>,
+
+    /// New title for the session
+    #[arg(short, long)]
+    title: Option<String>,
+
+    /// New group for the session (empty string to ungroup)
+    #[arg(short, long)]
+    group: Option<String>,
 }
 
 #[derive(Args)]
@@ -75,6 +92,7 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Restart(args) => restart_session(profile, args).await,
         SessionCommands::Attach(args) => attach_session(profile, args).await,
         SessionCommands::Show(args) => show_session(profile, args).await,
+        SessionCommands::Rename(args) => rename_session(profile, args).await,
         SessionCommands::Current(args) => current_session(args).await,
     }
 }
@@ -104,16 +122,36 @@ async fn start_session(profile: &str, args: SessionIdArgs) -> Result<()> {
 
 async fn stop_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (instances, _) = storage.load_with_groups()?;
+    let (mut instances, groups) = storage.load_with_groups()?;
 
     let inst = super::resolve_session(&args.identifier, &instances)?;
+    let session_id = inst.id.clone();
+    let title = inst.title.clone();
     let tmux_session = crate::tmux::Session::new(&inst.id, &inst.title)?;
+    let was_running = tmux_session.exists();
+    let had_container = inst.is_sandboxed()
+        && crate::containers::DockerContainer::from_session_id(&inst.id)
+            .is_running()
+            .unwrap_or(false);
 
-    if tmux_session.exists() {
-        tmux_session.kill()?;
-        println!("✓ Stopped session: {}", inst.title);
+    if !was_running && !had_container {
+        println!("Session is not running: {}", title);
+        return Ok(());
+    }
+
+    inst.stop()?;
+
+    // Persist Stopped status to disk so it survives TUI restarts
+    if let Some(stored) = instances.iter_mut().find(|i| i.id == session_id) {
+        stored.status = crate::session::Status::Stopped;
+    }
+    let group_tree = crate::session::GroupTree::new_with_groups(&instances, &groups);
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    if had_container {
+        println!("✓ Stopped session and container: {}", title);
     } else {
-        println!("Session is not running: {}", inst.title);
+        println!("✓ Stopped session: {}", title);
     }
 
     Ok(())
@@ -212,6 +250,82 @@ async fn show_session(profile: &str, args: ShowArgs) -> Result<()> {
         if let Some(parent_id) = &inst.parent_session_id {
             println!("  Parent:  {}", parent_id);
         }
+    }
+
+    Ok(())
+}
+
+async fn rename_session(profile: &str, args: RenameArgs) -> Result<()> {
+    if args.title.is_none() && args.group.is_none() {
+        bail!("At least one of --title or --group must be specified");
+    }
+
+    let storage = Storage::new(profile)?;
+    let (mut instances, groups) = storage.load_with_groups()?;
+
+    let inst = if let Some(id) = &args.identifier {
+        super::resolve_session(id, &instances)?
+    } else {
+        // Auto-detect from tmux
+        let current_session = std::env::var("TMUX_PANE")
+            .ok()
+            .and_then(|_| crate::tmux::get_current_session_name());
+
+        if let Some(session_name) = current_session {
+            instances
+                .iter()
+                .find(|i| {
+                    let tmux_name = crate::tmux::Session::generate_name(&i.id, &i.title);
+                    tmux_name == session_name
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Current tmux session is not an Agent of Empires session")
+                })?
+        } else {
+            bail!("Not in a tmux session. Specify a session ID or run inside tmux.");
+        }
+    };
+
+    let id = inst.id.clone();
+    let old_title = inst.title.clone();
+
+    let effective_title = args.title.unwrap_or(old_title.clone());
+    let effective_title = effective_title.trim().to_string();
+
+    let idx = instances
+        .iter()
+        .position(|i| i.id == id)
+        .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+
+    // Rename tmux session if title changed
+    if instances[idx].title != effective_title {
+        let tmux_session = crate::tmux::Session::new(&id, &instances[idx].title)?;
+        if tmux_session.exists() {
+            let new_tmux_name = crate::tmux::Session::generate_name(&id, &effective_title);
+            if let Err(e) = tmux_session.rename(&new_tmux_name) {
+                eprintln!("Warning: failed to rename tmux session: {}", e);
+            } else {
+                crate::tmux::refresh_session_cache();
+            }
+        }
+    }
+
+    instances[idx].title = effective_title.clone();
+
+    if let Some(group) = args.group {
+        instances[idx].group_path = group.trim().to_string();
+    }
+
+    let mut group_tree = GroupTree::new_with_groups(&instances, &groups);
+    if !instances[idx].group_path.is_empty() {
+        group_tree.create_group(&instances[idx].group_path);
+    }
+    storage.save_with_groups(&instances, &group_tree)?;
+
+    if old_title != effective_title {
+        println!("✓ Renamed session: {} → {}", old_title, effective_title);
+    } else {
+        println!("✓ Updated session: {}", effective_title);
     }
 
     Ok(())

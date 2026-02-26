@@ -53,6 +53,10 @@ impl Session {
         let args = build_create_args(&self.name, working_dir, command, size);
         let output = Command::new("tmux").args(&args).output()?;
 
+        // Note: With -d flag, tmux new-session returns 0 even if the shell command fails.
+        // Log args at debug level for troubleshooting.
+        tracing::debug!("tmux new-session args: {:?}", args);
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("Failed to create tmux session: {}", stderr);
@@ -81,7 +85,12 @@ impl Session {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to kill tmux session: {}", stderr);
+            // Session vanished between the exists() check and kill-session
+            // (e.g. process tree kill caused tmux to tear it down). That's
+            // fine -- the goal was to remove the session and it's gone.
+            if !stderr.contains("can't find session") {
+                bail!("Failed to kill tmux session: {}", stderr);
+            }
         }
 
         refresh_session_cache();

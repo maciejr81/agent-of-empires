@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::Args;
 use std::path::{Path, PathBuf};
 
-use crate::docker::{self, DockerContainer};
+use crate::containers::{self, ContainerRuntimeInterface};
 use crate::session::repo_config;
 use crate::session::{civilizations, Config, GroupTree, Instance, SandboxInfo, Storage};
 
@@ -22,7 +22,7 @@ pub struct AddArgs {
     #[arg(short = 'g', long)]
     group: Option<String>,
 
-    /// Command to run (e.g., 'claude', 'opencode', 'vibe', 'codex', 'gemini')
+    /// Command to run (e.g., 'claude', 'opencode', 'vibe', 'codex', 'gemini', 'cursor')
     #[arg(short = 'c', long = "cmd")]
     command: Option<String>,
 
@@ -49,6 +49,10 @@ pub struct AddArgs {
     /// Custom Docker image for sandbox (implies --sandbox)
     #[arg(long = "sandbox-image")]
     sandbox_image: Option<String>,
+
+    /// Enable YOLO mode (skip permission prompts)
+    #[arg(short = 'y', long)]
+    yolo: bool,
 
     /// Automatically trust repository hooks without prompting
     #[arg(long = "trust-hooks")]
@@ -163,43 +167,55 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     }
 
     if let Some(cmd) = &args.command {
-        instance.command = cmd.clone();
-        instance.tool = detect_tool(cmd)?;
+        let tool_name = detect_tool(cmd)?;
+        instance.tool = tool_name;
+        // Only store a custom command when the user passed extra args
+        // (e.g. "claude --resume xyz"). A bare tool name/alias should resolve
+        // through the agent definition so the correct binary is used.
+        if cmd.trim().contains(' ') {
+            instance.command = cmd.clone();
+        }
     }
 
     if let Some(worktree_info) = worktree_info_opt {
         instance.worktree_info = Some(worktree_info);
     }
 
+    instance.yolo_mode = args.yolo;
+
     // Handle sandbox setup
     let use_sandbox = args.sandbox || args.sandbox_image.is_some();
     let config = Config::load()?;
 
+    let runtime = containers::get_container_runtime();
     if use_sandbox || config.sandbox.enabled_by_default {
-        if !docker::is_docker_available() {
+        if !runtime.is_available() {
             if use_sandbox {
                 bail!(
-                    "Docker is not installed or not accessible.\n\
+                    "Container runtime is not installed or not accessible.\n\
                      Install Docker: https://docs.docker.com/get-docker/\n\
+                     Or on macOS: Apple Container\n\
                      Tip: Use 'aoe add' without --sandbox to run directly on host"
                 );
             }
         } else {
-            let container_name = DockerContainer::generate_name(&instance.id);
+            let container_name = containers::DockerContainer::generate_name(&instance.id);
             let image = args
                 .sandbox_image
                 .as_ref()
                 .map(|s| s.trim().to_string())
-                .unwrap_or_else(docker::effective_default_image);
+                .unwrap_or_else(|| runtime.effective_default_image());
             instance.sandbox_info = Some(SandboxInfo {
                 enabled: true,
                 container_id: None,
                 image,
                 container_name,
                 created_at: None,
-                yolo_mode: None,
                 extra_env_keys: None,
                 extra_env_values: None,
+                custom_instruction: Config::load()
+                    .ok()
+                    .and_then(|c| c.sandbox.custom_instruction),
             });
         }
     }
@@ -260,7 +276,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                 if let Ok(git_wt) =
                     crate::git::GitWorktree::new(std::path::PathBuf::from(&wt_info.main_repo_path))
                 {
-                    let _ = git_wt.remove_worktree(&path);
+                    let _ = git_wt.remove_worktree(&path, false);
                 }
             }
         }
@@ -290,6 +306,9 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     }
     if instance.sandbox_info.is_some() {
         println!("  Sandbox: enabled");
+    }
+    if instance.yolo_mode {
+        println!("  YOLO:    enabled");
     }
 
     if args.launch {
@@ -339,23 +358,15 @@ fn trust_and_run_on_create(
 }
 
 fn detect_tool(cmd: &str) -> Result<String> {
-    let cmd_lower = cmd.to_lowercase();
-    if cmd_lower.is_empty() || cmd_lower.contains("claude") {
-        Ok("claude".to_string())
-    } else if cmd_lower.contains("opencode") || cmd_lower.contains("open-code") {
-        Ok("opencode".to_string())
-    } else if cmd_lower.contains("vibe") || cmd_lower.contains("mistral-vibe") {
-        Ok("vibe".to_string())
-    } else if cmd_lower.contains("codex") {
-        Ok("codex".to_string())
-    } else if cmd_lower.contains("gemini") {
-        Ok("gemini".to_string())
-    } else {
-        bail!(
-            "Unknown tool in command: {}\n\
-             Supported tools: claude, opencode, vibe, codex, gemini\n\
-             Tip: Command must contain one of the supported tool names",
-            cmd
-        )
-    }
+    crate::agents::resolve_tool_name(cmd)
+        .map(|name| name.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown tool in command: {}\n\
+                 Supported tools: {}\n\
+                 Tip: Command must contain one of the supported tool names",
+                cmd,
+                crate::agents::agent_names().join(", ")
+            )
+        })
 }

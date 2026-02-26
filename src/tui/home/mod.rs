@@ -95,6 +95,7 @@ pub(super) const ICON_WAITING: &str = "◐";
 pub(super) const ICON_IDLE: &str = "○";
 pub(super) const ICON_ERROR: &str = "✕";
 pub(super) const ICON_STARTING: &str = "◌";
+pub(super) const ICON_STOPPED: &str = "■";
 pub(super) const ICON_DELETING: &str = "✗";
 pub(super) const ICON_COLLAPSED: &str = "▶";
 pub(super) const ICON_EXPANDED: &str = "▼";
@@ -127,14 +128,20 @@ pub struct HomeView {
     pub(super) welcome_dialog: Option<WelcomeDialog>,
     pub(super) changelog_dialog: Option<ChangelogDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
+    /// Session to attach after the custom instruction warning dialog is dismissed
+    pub(super) pending_attach_after_warning: Option<String>,
+    /// Session to stop after the confirmation dialog is accepted
+    pub(super) pending_stop_session: Option<String>,
 
     // Search
     pub(super) search_active: bool,
     pub(super) search_query: Input,
-    pub(super) filtered_items: Option<Vec<usize>>,
+    pub(super) search_matches: Vec<usize>,
+    pub(super) search_match_index: usize,
 
     // Filter by user_active
     pub(super) filter_user_active: bool,
+    pub(super) filtered_items: Option<Vec<usize>>,
 
     // Sort and display options
     pub(super) sort_mode: SortMode,
@@ -167,6 +174,9 @@ pub struct HomeView {
     // Default terminal mode from config
     pub(super) default_terminal_mode: TerminalMode,
 
+    // Sound config for state transition sounds
+    pub(super) sound_config: crate::sound::SoundConfig,
+
     // Settings view
     pub(super) settings_view: Option<SettingsView>,
     /// Flag to indicate we're confirming settings close (unsaved changes)
@@ -181,11 +191,7 @@ pub struct HomeView {
 
 impl HomeView {
     pub fn new(storage: Storage, available_tools: AvailableTools) -> anyhow::Result<Self> {
-        let (mut instances, groups) = storage.load_with_groups()?;
-
-        for inst in &mut instances {
-            inst.update_search_cache();
-        }
+        let (instances, groups) = storage.load_with_groups()?;
 
         let instance_map: HashMap<String, Instance> = instances
             .iter()
@@ -194,12 +200,18 @@ impl HomeView {
         let group_tree = GroupTree::new_with_groups(&instances, &groups);
         let flat_items = flatten_tree(&group_tree, &instances);
 
-        // Load the resolved config to get the default terminal mode
-        let default_terminal_mode = resolve_config(storage.profile())
+        // Load the resolved config to get the default terminal mode and sound config
+        let resolved = resolve_config(storage.profile());
+        let default_terminal_mode = resolved
+            .as_ref()
             .map(|config| match config.sandbox.default_terminal_mode {
                 DefaultTerminalMode::Host => TerminalMode::Host,
                 DefaultTerminalMode::Container => TerminalMode::Container,
             })
+            .unwrap_or_default();
+        let sound_config = resolved
+            .as_ref()
+            .map(|config| config.sound.clone())
             .unwrap_or_default();
 
         let mut view = Self {
@@ -224,8 +236,12 @@ impl HomeView {
             welcome_dialog: None,
             changelog_dialog: None,
             info_dialog: None,
+            pending_attach_after_warning: None,
+            pending_stop_session: None,
             search_active: false,
             search_query: Input::default(),
+            search_matches: Vec::new(),
+            search_match_index: 0,
             filtered_items: None,
             filter_user_active: false,
             sort_mode: SortMode::default(),
@@ -242,6 +258,7 @@ impl HomeView {
             container_terminal_preview_cache: PreviewCache::default(),
             terminal_modes: HashMap::new(),
             default_terminal_mode,
+            sound_config,
             settings_view: None,
             settings_close_confirm: false,
             diff_view: None,
@@ -269,7 +286,6 @@ impl HomeView {
                 inst.last_error_check = prev.last_error_check;
                 inst.last_start_time = prev.last_start_time;
             }
-            inst.update_search_cache();
         }
 
         self.instances = instances;
@@ -290,6 +306,14 @@ impl HomeView {
             self.update_selected();
         }
 
+        if self.search_active && !self.search_query.value().is_empty() {
+            self.update_search();
+        } else if !self.search_matches.is_empty() {
+            // Recalculate match indices without moving the cursor
+            self.refresh_search_matches();
+        }
+
+        self.update_selected();
         Ok(())
     }
 
@@ -405,13 +429,27 @@ impl HomeView {
         if let Some(updates) = self.status_poller.try_recv_updates() {
             for update in updates {
                 if let Some(inst) = self.instances.iter_mut().find(|i| i.id == update.id) {
-                    if inst.status != Status::Deleting {
+                    if inst.status != Status::Deleting
+                        && inst.status != Status::Stopped
+                        && update.status != Status::Stopped
+                    {
+                        let old_status = inst.status;
                         inst.status = update.status;
                         inst.last_error = update.last_error.clone();
+                        if old_status != update.status {
+                            crate::sound::play_for_transition(
+                                old_status,
+                                update.status,
+                                &self.sound_config,
+                            );
+                        }
                     }
                 }
                 if let Some(inst) = self.instance_map.get_mut(&update.id) {
-                    if inst.status != Status::Deleting {
+                    if inst.status != Status::Deleting
+                        && inst.status != Status::Stopped
+                        && update.status != Status::Stopped
+                    {
                         inst.status = update.status;
                         inst.last_error = update.last_error;
                     }
@@ -640,6 +678,21 @@ impl HomeView {
         Some(profiles[next_idx].clone())
     }
 
+    pub fn set_instance_status(&mut self, id: &str, status: crate::session::Status) {
+        if let Some(inst) = self.instance_map.get_mut(id) {
+            inst.status = status;
+        }
+        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
+            inst.status = status;
+        }
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        self.storage
+            .save_with_groups(&self.instances, &self.group_tree)?;
+        Ok(())
+    }
+
     pub fn set_instance_error(&mut self, id: &str, error: Option<String>) {
         if let Some(inst) = self.instance_map.get_mut(id) {
             inst.last_error = error.clone();
@@ -733,7 +786,8 @@ impl HomeView {
                 DefaultTerminalMode::Container => TerminalMode::Container,
             };
 
-            // Add other config-dependent state refreshes here as needed
+            // Refresh sound config
+            self.sound_config = config.sound.clone();
         }
     }
 

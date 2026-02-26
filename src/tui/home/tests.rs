@@ -30,13 +30,7 @@ fn create_test_env_empty() -> TestEnv {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
     let storage = Storage::new("test").unwrap();
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
 }
@@ -54,13 +48,7 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
     }
     storage.save(&instances).unwrap();
 
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
 }
@@ -84,13 +72,7 @@ fn create_test_env_with_groups() -> TestEnv {
 
     storage.save(&instances).unwrap();
 
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
 }
@@ -169,13 +151,8 @@ fn test_n_opens_new_dialog() {
 fn test_has_dialog_returns_true_for_new_dialog() {
     let mut env = create_test_env_empty();
     env.view.new_dialog = Some(NewSessionDialog::new(
-        AvailableTools {
-            claude: true,
-            opencode: false,
-            vibe: false,
-            codex: false,
-            gemini: false,
-        },
+        AvailableTools::with_tools(&["claude"]),
+        Vec::new(),
         Vec::new(),
         "default",
     ));
@@ -370,18 +347,20 @@ fn test_search_mode_esc_exits_and_clears() {
     env.view.handle_key(key(KeyCode::Esc));
     assert!(!env.view.search_active);
     assert!(env.view.search_query.value().is_empty());
-    assert!(env.view.filtered_items.is_none());
+    assert!(env.view.search_matches.is_empty());
 }
 
 #[test]
 #[serial]
-fn test_search_mode_enter_exits_keeps_filter() {
+fn test_search_mode_enter_exits_and_clears_state() {
     let mut env = create_test_env_with_sessions(3);
     env.view.handle_key(key(KeyCode::Char('/')));
     env.view.handle_key(key(KeyCode::Char('s')));
     env.view.handle_key(key(KeyCode::Enter));
     assert!(!env.view.search_active);
-    assert_eq!(env.view.search_query.value(), "s");
+    assert_eq!(env.view.search_query.value(), "");
+    assert!(env.view.search_matches.is_empty());
+    assert_eq!(env.view.search_match_index, 0);
 }
 
 #[test]
@@ -433,95 +412,215 @@ fn test_selected_group_set_when_on_group() {
 
 #[test]
 #[serial]
-fn test_filter_matches_session_title() {
+fn test_search_matches_session_title() {
     let mut env = create_test_env_with_sessions(5);
     env.view.search_query = Input::new("session2".to_string());
-    env.view.update_filter();
-    assert!(env.view.filtered_items.is_some());
-    let filtered = env.view.filtered_items.as_ref().unwrap();
-    assert_eq!(filtered.len(), 1);
+    env.view.update_search();
+    assert!(!env.view.search_matches.is_empty());
+    // The best match should be session2
+    let best_idx = env.view.search_matches[0];
+    if let Item::Session { id, .. } = &env.view.flat_items[best_idx] {
+        let inst = env.view.instance_map.get(id).unwrap();
+        assert!(inst.title.contains("session2"));
+    }
 }
 
 #[test]
 #[serial]
-fn test_filter_case_insensitive() {
+fn test_search_case_insensitive() {
     let mut env = create_test_env_with_sessions(5);
     env.view.search_query = Input::new("SESSION2".to_string());
-    env.view.update_filter();
-    assert!(env.view.filtered_items.is_some());
-    let filtered = env.view.filtered_items.as_ref().unwrap();
-    assert_eq!(filtered.len(), 1);
+    env.view.update_search();
+    assert!(!env.view.search_matches.is_empty());
 }
 
 #[test]
 #[serial]
-fn test_filter_matches_path() {
+fn test_search_matches_path() {
     let mut env = create_test_env_with_sessions(5);
     env.view.search_query = Input::new("/tmp/3".to_string());
-    env.view.update_filter();
-    assert!(env.view.filtered_items.is_some());
-    let filtered = env.view.filtered_items.as_ref().unwrap();
-    assert_eq!(filtered.len(), 1);
+    env.view.update_search();
+    assert!(!env.view.search_matches.is_empty());
 }
 
 #[test]
 #[serial]
-fn test_filter_matches_group_name() {
+fn test_search_matches_group_name() {
     let mut env = create_test_env_with_groups();
     env.view.search_query = Input::new("work".to_string());
-    env.view.update_filter();
-    assert!(env.view.filtered_items.is_some());
-    let filtered = env.view.filtered_items.as_ref().unwrap();
-    assert!(!filtered.is_empty());
+    env.view.update_search();
+    assert!(!env.view.search_matches.is_empty());
 }
 
 #[test]
 #[serial]
-fn test_filter_empty_query_clears_filter() {
+fn test_search_empty_query_clears_matches() {
     let mut env = create_test_env_with_sessions(5);
     env.view.search_query = Input::new("session".to_string());
-    env.view.update_filter();
-    assert!(env.view.filtered_items.is_some());
+    env.view.update_search();
+    assert!(!env.view.search_matches.is_empty());
 
     env.view.search_query = Input::default();
-    env.view.update_filter();
-    assert!(env.view.filtered_items.is_none());
+    env.view.update_search();
+    assert!(env.view.search_matches.is_empty());
 }
 
 #[test]
 #[serial]
-fn test_filter_resets_cursor() {
+fn test_search_no_matches() {
     let mut env = create_test_env_with_sessions(5);
-    env.view.cursor = 3;
-    env.view.search_query = Input::new("session".to_string());
-    env.view.update_filter();
+    env.view.search_query = Input::new("zzzznonexistent".to_string());
+    env.view.update_search();
+    assert!(env.view.search_matches.is_empty());
+}
+
+#[test]
+#[serial]
+fn test_search_jumps_to_best_match() {
+    let mut env = create_test_env_with_sessions(5);
+    env.view.cursor = 4; // start at end
+    env.view.search_query = Input::new("session0".to_string());
+    env.view.update_search();
+    // Cursor should jump to the best match (session0 is at index 0)
     assert_eq!(env.view.cursor, 0);
 }
 
 #[test]
 #[serial]
-fn test_filter_no_matches() {
+fn test_search_keeps_full_list() {
     let mut env = create_test_env_with_sessions(5);
-    env.view.search_query = Input::new("nonexistent".to_string());
-    env.view.update_filter();
-    assert!(env.view.filtered_items.is_some());
-    let filtered = env.view.filtered_items.as_ref().unwrap();
-    assert_eq!(filtered.len(), 0);
+    let original_len = env.view.flat_items.len();
+    env.view.search_query = Input::new("session2".to_string());
+    env.view.update_search();
+    // All items should still be in flat_items
+    assert_eq!(env.view.flat_items.len(), original_len);
 }
 
 #[test]
 #[serial]
-fn test_cursor_moves_within_filtered_list() {
+fn test_search_n_cycles_forward() {
+    let mut env = create_test_env_with_sessions(5);
+    env.view.search_query = Input::new("session".to_string());
+    env.view.update_search();
+    let match_count = env.view.search_matches.len();
+    assert!(match_count > 1);
+
+    let first_cursor = env.view.cursor;
+    env.view.handle_key(key(KeyCode::Char('n')));
+    assert_eq!(env.view.search_match_index, 1);
+    // Cursor should have moved
+    assert_ne!(env.view.cursor, first_cursor);
+}
+
+#[test]
+#[serial]
+fn test_search_n_wraps_around() {
+    let mut env = create_test_env_with_sessions(3);
+    env.view.search_query = Input::new("session".to_string());
+    env.view.update_search();
+    let match_count = env.view.search_matches.len();
+
+    // Cycle through all matches to wrap
+    for _ in 0..match_count {
+        env.view.handle_key(key(KeyCode::Char('n')));
+    }
+    assert_eq!(env.view.search_match_index, 0);
+}
+
+#[test]
+#[serial]
+fn test_search_shift_n_cycles_backward() {
+    let mut env = create_test_env_with_sessions(5);
+    env.view.search_query = Input::new("session".to_string());
+    env.view.update_search();
+    let match_count = env.view.search_matches.len();
+    assert!(match_count > 1);
+
+    // N from index 0 should wrap to last
+    env.view.handle_key(key(KeyCode::Char('N')));
+    assert_eq!(env.view.search_match_index, match_count - 1);
+}
+
+#[test]
+#[serial]
+fn test_esc_clears_search_matches() {
+    let mut env = create_test_env_with_sessions(5);
+    env.view.handle_key(key(KeyCode::Char('/')));
+    env.view.handle_key(key(KeyCode::Char('s')));
+    assert!(!env.view.search_matches.is_empty());
+    env.view.handle_key(key(KeyCode::Esc));
+    assert!(env.view.search_matches.is_empty());
+    assert_eq!(env.view.search_match_index, 0);
+}
+
+#[test]
+#[serial]
+fn test_enter_clears_matches_so_n_opens_new_dialog() {
+    let mut env = create_test_env_with_sessions(5);
+    // Search, then Enter to exit search mode
+    env.view.handle_key(key(KeyCode::Char('/')));
+    env.view.handle_key(key(KeyCode::Char('s')));
+    env.view.handle_key(key(KeyCode::Enter));
+    assert!(!env.view.search_active);
+    // Enter should have cleared matches
+    assert!(env.view.search_matches.is_empty());
+
+    // n should now open new session dialog (not cycle matches)
+    assert!(env.view.new_dialog.is_none());
+    env.view.handle_key(key(KeyCode::Char('n')));
+    assert!(env.view.new_dialog.is_some());
+}
+
+#[test]
+#[serial]
+fn test_reload_does_not_snap_cursor_after_enter() {
+    let mut env = create_test_env_with_sessions(5);
+    // Search and exit with Enter
+    env.view.handle_key(key(KeyCode::Char('/')));
+    env.view.handle_key(key(KeyCode::Char('s')));
+    env.view.handle_key(key(KeyCode::Enter));
+    assert!(!env.view.search_active);
+
+    // Navigate away from the search result
+    env.view.cursor = 4;
+    env.view.update_selected();
+
+    // Simulate periodic reload
+    env.view.reload().unwrap();
+
+    // Cursor should stay where the user put it, not snap back to best match
+    assert_eq!(env.view.cursor, 4);
+}
+
+#[test]
+#[serial]
+fn test_enter_clears_matches_and_resets_index() {
+    let mut env = create_test_env_with_sessions(5);
+    env.view.handle_key(key(KeyCode::Char('/')));
+    env.view.handle_key(key(KeyCode::Char('s')));
+    let match_count = env.view.search_matches.len();
+    assert!(match_count > 0);
+
+    env.view.handle_key(key(KeyCode::Enter));
+    assert!(!env.view.search_active);
+    // Enter should clear matches so normal keybindings work
+    assert!(env.view.search_matches.is_empty());
+    assert_eq!(env.view.search_match_index, 0);
+}
+
+#[test]
+#[serial]
+fn test_cursor_moves_over_full_list_during_search() {
     let mut env = create_test_env_with_sessions(10);
     env.view.search_query = Input::new("session".to_string());
-    env.view.update_filter();
-    let filtered_count = env.view.filtered_items.as_ref().unwrap().len();
+    env.view.update_search();
 
+    // Cursor should be able to move to last item in full list
     env.view.cursor = 0;
-    for _ in 0..(filtered_count + 5) {
-        env.view.handle_key(key(KeyCode::Down));
+    for _ in 0..20 {
+        env.view.move_cursor(1);
     }
-    assert_eq!(env.view.cursor, filtered_count - 1);
+    assert_eq!(env.view.cursor, 9); // last item in 10-item list
 }
 
 #[test]
@@ -598,13 +697,7 @@ fn test_get_next_profile_cycles_through_profiles() {
     crate::session::create_profile("gamma").unwrap();
 
     let storage = Storage::new("alpha").unwrap();
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
 
     // From alpha -> beta
@@ -622,13 +715,7 @@ fn test_get_next_profile_wraps_around() {
 
     // Start on beta (last alphabetically)
     let storage = Storage::new("beta").unwrap();
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
 
     // From beta -> alpha (wraps)
@@ -645,13 +732,7 @@ fn test_uppercase_p_returns_switch_profile_action() {
     crate::session::create_profile("second").unwrap();
 
     let storage = Storage::new("first").unwrap();
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(storage, tools).unwrap();
 
     let action = view.handle_key(key(KeyCode::Char('P')));
@@ -741,7 +822,7 @@ fn test_has_dialog_includes_settings_view() {
 
     assert!(!view.has_dialog());
 
-    view.settings_view = Some(SettingsView::new("test").unwrap());
+    view.settings_view = Some(SettingsView::new("test", None).unwrap());
     assert!(view.has_dialog());
 }
 
@@ -781,9 +862,9 @@ fn create_test_env_with_group_sessions() -> TestEnv {
         image: "ubuntu:latest".to_string(),
         container_name: "test-container".to_string(),
         created_at: None,
-        yolo_mode: None,
         extra_env_keys: None,
         extra_env_values: None,
+        custom_instruction: None,
     });
     instances.push(inst3);
 
@@ -796,13 +877,7 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     let group_tree = GroupTree::new_with_groups(&instances, &[]);
     storage.save_with_groups(&instances, &group_tree).unwrap();
 
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
     TestEnv { _temp: temp, view }
 }
@@ -832,13 +907,7 @@ fn test_group_has_managed_worktrees() {
 
     storage.save(&[inst1, inst2]).unwrap();
 
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
 
     assert!(view.group_has_managed_worktrees("work", "work/"));
@@ -862,9 +931,9 @@ fn test_group_has_containers() {
         image: "ubuntu:latest".to_string(),
         container_name: "test-container".to_string(),
         created_at: None,
-        yolo_mode: None,
         extra_env_keys: None,
         extra_env_values: None,
+        custom_instruction: None,
     });
 
     let mut inst2 = Instance::new("other-session", "/tmp/other");
@@ -872,13 +941,7 @@ fn test_group_has_containers() {
 
     storage.save(&[inst1, inst2]).unwrap();
 
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(storage, tools).unwrap();
 
     assert!(view.group_has_containers("work", "work/"));
@@ -944,6 +1007,7 @@ fn test_delete_group_with_sessions_updates_groups_field() {
         delete_worktrees: false,
         delete_branches: false,
         delete_containers: false,
+        force_delete_worktrees: false,
     };
     env.view.delete_group_with_sessions(&options).unwrap();
 
@@ -993,13 +1057,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
 
     storage.save(&[inst1]).unwrap();
 
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(storage, tools).unwrap();
 
     // Select the work group
@@ -1013,6 +1071,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
         delete_worktrees: true,
         delete_branches: false,
         delete_containers: false,
+        force_delete_worktrees: false,
     };
     view.delete_group_with_sessions(&options).unwrap();
 
@@ -1039,20 +1098,14 @@ fn test_delete_group_with_sessions_respects_container_option() {
         image: "ubuntu:latest".to_string(),
         container_name: "test-container".to_string(),
         created_at: None,
-        yolo_mode: None,
         extra_env_keys: None,
         extra_env_values: None,
+        custom_instruction: None,
     });
 
     storage.save(&[inst1]).unwrap();
 
-    let tools = AvailableTools {
-        claude: true,
-        opencode: false,
-        vibe: false,
-        codex: false,
-        gemini: false,
-    };
+    let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(storage, tools).unwrap();
 
     // Select the work group
@@ -1066,6 +1119,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
         delete_worktrees: false,
         delete_branches: false,
         delete_containers: true,
+        force_delete_worktrees: false,
     };
     view.delete_group_with_sessions(&options).unwrap();
 
@@ -1100,6 +1154,7 @@ fn test_delete_group_includes_nested_groups() {
         delete_worktrees: false,
         delete_branches: false,
         delete_containers: false,
+        force_delete_worktrees: false,
     };
     env.view.delete_group_with_sessions(&options).unwrap();
 

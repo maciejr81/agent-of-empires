@@ -12,8 +12,15 @@ use ratatui::{
 };
 use tui_input::Input;
 
-use super::{FieldValue, SettingsFocus, SettingsScope, SettingsView};
+use super::{FieldValue, SettingsCategory, SettingsFocus, SettingsScope, SettingsView};
 use crate::tui::styles::Theme;
+
+/// Detect if we're running over SSH
+fn is_ssh_session() -> bool {
+    std::env::var("SSH_CONNECTION").is_ok()
+        || std::env::var("SSH_CLIENT").is_ok()
+        || std::env::var("SSH_TTY").is_ok()
+}
 
 impl SettingsView {
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -33,6 +40,11 @@ impl SettingsView {
         self.render_header(frame, layout[0], theme);
         self.render_content(frame, layout[1], theme);
         self.render_footer(frame, layout[2], theme);
+
+        // Render custom instruction dialog overlay if active
+        if let Some(ref dialog) = self.custom_instruction_dialog {
+            dialog.render(frame, area, theme);
+        }
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -43,26 +55,22 @@ impl SettingsView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Tabs: [ Global ] [ Profile: name ]
-        let global_style = if self.scope == SettingsScope::Global {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.dimmed)
-        };
-
-        let profile_style = if self.scope == SettingsScope::Profile {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.dimmed)
-        };
-
         let modified = if self.has_changes { " *" } else { "" };
 
-        let tabs = Line::from(vec![
+        let scope_style = |scope: SettingsScope| -> Style {
+            if self.scope == scope {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.dimmed)
+            }
+        };
+
+        let global_style = scope_style(SettingsScope::Global);
+        let profile_style = scope_style(SettingsScope::Profile);
+
+        let mut spans = vec![
             Span::styled("  Settings", Style::default().fg(theme.text)),
             Span::styled(modified, Style::default().fg(theme.error)),
             Span::raw("    "),
@@ -73,9 +81,18 @@ impl SettingsView {
             Span::styled("[ ", Style::default().fg(theme.border)),
             Span::styled(format!("Profile: {}", self.profile), profile_style),
             Span::styled(" ]", Style::default().fg(theme.border)),
-        ]);
+        ];
 
-        frame.render_widget(Paragraph::new(tabs), inner);
+        // Show Repo tab when a project path is available
+        if self.project_path.is_some() {
+            let repo_style = scope_style(SettingsScope::Repo);
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("[ ", Style::default().fg(theme.border)));
+            spans.push(Span::styled("Repo", repo_style));
+            spans.push(Span::styled(" ]", Style::default().fg(theme.border)));
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), inner);
     }
 
     fn render_content(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -158,16 +175,53 @@ impl SettingsView {
         frame.render_widget(block, area);
 
         if self.fields.is_empty() {
-            let msg = Paragraph::new("No settings in this category")
-                .style(Style::default().fg(theme.dimmed));
+            let msg = if self.scope == SettingsScope::Repo {
+                "No repo-level settings for this category"
+            } else {
+                "No settings in this category"
+            };
+            let msg = Paragraph::new(msg).style(Style::default().fg(theme.dimmed));
             frame.render_widget(msg, inner);
             return;
         }
 
+        // Show SSH warning for Sound category
+        let current_category = self.categories[self.selected_category];
+        let warning_offset = if current_category == SettingsCategory::Sound && is_ssh_session() {
+            let warning = vec![
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(theme.waiting)),
+                    Span::styled(
+                        "Warning: Audio playback doesn't work over SSH",
+                        Style::default().fg(theme.waiting),
+                    ),
+                ]),
+                Line::from(vec![Span::styled(
+                    "  Sounds require local terminal with audio output.",
+                    Style::default().fg(theme.dimmed),
+                )]),
+                Line::from(""),
+            ];
+            let warning_widget = Paragraph::new(warning);
+            let warning_area = Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 3,
+            };
+            frame.render_widget(warning_widget, warning_area);
+            3u16
+        } else {
+            0u16
+        };
+
         // Reserve space for messages at the bottom
         let has_message = self.error_message.is_some() || self.success_message.is_some();
         let message_height: u16 = if has_message { 2 } else { 0 };
-        let fields_viewport_height = inner.height.saturating_sub(message_height);
+        let fields_viewport_height = inner
+            .height
+            .saturating_sub(message_height)
+            .saturating_sub(warning_offset);
         self.fields_viewport_height = fields_viewport_height;
 
         // Calculate total content height
@@ -203,7 +257,7 @@ impl SettingsView {
             let is_selected = i == self.selected_field && is_focused;
             let field_area = Rect {
                 x: inner.x,
-                y: inner.y + visible_y,
+                y: inner.y + visible_y + warning_offset,
                 width: inner.width,
                 height: field_h.min(fields_viewport_height.saturating_sub(visible_y)),
             };
@@ -326,8 +380,22 @@ impl SettingsView {
                 self.render_text_field(frame, value_area, value, index, is_selected, theme);
             }
             FieldValue::OptionalText(value) => {
-                let display = value.as_deref().unwrap_or("");
-                self.render_text_field(frame, value_area, display, index, is_selected, theme);
+                let display = match value.as_deref() {
+                    Some(text) if field.key == super::FieldKey::CustomInstruction => {
+                        let collapsed: String = text
+                            .chars()
+                            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                            .collect();
+                        if collapsed.len() > 47 {
+                            format!("{}...", &collapsed[..47])
+                        } else {
+                            collapsed
+                        }
+                    }
+                    Some(text) => text.to_string(),
+                    None => String::new(),
+                };
+                self.render_text_field(frame, value_area, &display, index, is_selected, theme);
             }
             FieldValue::Number(value) => {
                 self.render_number_field(frame, value_area, *value, index, is_selected, theme);
@@ -649,7 +717,9 @@ impl SettingsView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let help_text = if self.editing_input.is_some() {
+        let help_text = if self.custom_instruction_dialog.is_some() {
+            "Tab: switch focus | Enter: edit/confirm | Esc: cancel"
+        } else if self.editing_input.is_some() {
             "Enter: confirm | Esc: cancel"
         } else if self.list_edit_state.is_some() {
             "a: add | d: delete | Enter: edit | Esc: close list"

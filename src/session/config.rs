@@ -1,12 +1,12 @@
 //! User configuration management
 
+use super::get_app_dir;
+use super::repo_config::HooksConfig;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-
-use super::get_app_dir;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -38,6 +38,12 @@ pub struct Config {
     pub diff: DiffConfig,
 
     #[serde(default)]
+    pub hooks: HooksConfig,
+
+    #[serde(default)]
+    pub sound: crate::sound::SoundConfig,
+
+    #[serde(default)]
     pub app_state: AppStateConfig,
 }
 
@@ -54,6 +60,9 @@ pub struct AppStateConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_file_list_width: Option<u16>,
+
+    #[serde(default)]
+    pub has_seen_custom_instruction_warning: bool,
 }
 
 /// Session-related configuration defaults
@@ -63,6 +72,10 @@ pub struct SessionConfig {
     /// If not set or tool is unavailable, falls back to first available tool
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_tool: Option<String>,
+
+    /// Enable YOLO mode by default for new sessions (skip permission prompts)
+    #[serde(default)]
+    pub yolo_mode_default: bool,
 }
 
 /// Diff view configuration
@@ -192,10 +205,6 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub enabled_by_default: bool,
 
-    /// When sandbox is enabled, default YOLO mode to true (skip permission prompts)
-    #[serde(default)]
-    pub yolo_mode_default: bool,
-
     #[serde(default = "default_sandbox_image")]
     pub default_image: String,
 
@@ -227,13 +236,33 @@ pub struct SandboxConfig {
     /// Relative directory paths to exclude from the host bind mount via anonymous volumes
     #[serde(default)]
     pub volume_ignores: Vec<String>,
+
+    /// Mount ~/.ssh into sandbox containers (default: false)
+    #[serde(default)]
+    pub mount_ssh: bool,
+
+    /// Custom instruction text appended to the agent's system prompt in sandboxed sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_instruction: Option<String>,
+
+    /// Container runtime to use for sandboxing (docker or apple_container)
+    #[serde(default)]
+    pub container_runtime: ContainerRuntimeName,
+}
+
+/// Container runtime options for sandboxing
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerRuntimeName {
+    AppleContainer,
+    #[default]
+    Docker,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             enabled_by_default: false,
-            yolo_mode_default: false,
             default_image: default_sandbox_image(),
             extra_volumes: Vec::new(),
             environment: default_sandbox_environment(),
@@ -243,12 +272,15 @@ impl Default for SandboxConfig {
             memory_limit: None,
             default_terminal_mode: DefaultTerminalMode::default(),
             volume_ignores: Vec::new(),
+            mount_ssh: false,
+            custom_instruction: None,
+            container_runtime: ContainerRuntimeName::default(),
         }
     }
 }
 
 fn default_sandbox_image() -> String {
-    crate::docker::default_sandbox_image().to_string()
+    "ghcr.io/njbrake/aoe-sandbox:latest".to_string()
 }
 
 fn default_sandbox_environment() -> Vec<String> {

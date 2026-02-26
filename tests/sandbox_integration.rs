@@ -5,11 +5,12 @@
 //! - Container cleanup when deleting a sandboxed session
 //! - Docker availability validation
 
-use agent_of_empires::docker::{is_daemon_running, is_docker_available, DockerContainer};
+use agent_of_empires::containers::{self, ContainerRuntimeInterface, DockerContainer};
 use agent_of_empires::session::{Instance, SandboxInfo, Storage};
 
 fn docker_available() -> bool {
-    is_docker_available() && is_daemon_running()
+    let rt = containers::get_container_runtime();
+    rt.is_available() && rt.is_daemon_running()
 }
 
 #[test]
@@ -20,9 +21,9 @@ fn test_sandbox_info_serialization() {
         image: "ubuntu:latest".to_string(),
         container_name: "aoe-sandbox-test1234".to_string(),
         created_at: Some(chrono::Utc::now()),
-        yolo_mode: None,
         extra_env_keys: Some(vec!["MY_VAR".to_string()]),
         extra_env_values: None,
+        custom_instruction: None,
     };
 
     let json = serde_json::to_string(&sandbox_info).unwrap();
@@ -49,9 +50,9 @@ fn test_instance_is_sandboxed() {
         image: "test-image".to_string(),
         container_name: "aoe-sandbox-test".to_string(),
         created_at: None,
-        yolo_mode: None,
         extra_env_keys: None,
         extra_env_values: None,
+        custom_instruction: None,
     });
     assert!(inst.is_sandboxed());
 
@@ -61,9 +62,9 @@ fn test_instance_is_sandboxed() {
         image: "test-image".to_string(),
         container_name: "aoe-sandbox-test".to_string(),
         created_at: None,
-        yolo_mode: None,
         extra_env_keys: None,
         extra_env_values: None,
+        custom_instruction: None,
     });
     assert!(!inst.is_sandboxed());
 }
@@ -82,9 +83,9 @@ fn test_sandbox_info_persists_across_save_load() {
         image: "custom:image".to_string(),
         container_name: "aoe-sandbox-abcd1234".to_string(),
         created_at: Some(chrono::Utc::now()),
-        yolo_mode: Some(true),
         extra_env_keys: Some(vec!["API_KEY".to_string(), "SECRET".to_string()]),
         extra_env_values: None,
+        custom_instruction: None,
     });
 
     storage.save(&[inst.clone()]).unwrap();
@@ -134,10 +135,10 @@ fn test_container_lifecycle() {
 
     assert!(!container.exists().unwrap());
 
-    let config = agent_of_empires::docker::ContainerConfig {
+    let config = containers::ContainerConfig {
         working_dir: "/workspace".to_string(),
         volumes: vec![],
-        named_volumes: vec![],
+
         anonymous_volumes: vec![],
         environment: vec![],
         cpu_limit: None,
@@ -173,12 +174,12 @@ fn test_container_force_remove() {
             .as_millis()
     );
 
-    let container = DockerContainer::new(&session_id, "alpine:latest");
+    let container = containers::DockerContainer::new(&session_id, "alpine:latest");
 
-    let config = agent_of_empires::docker::ContainerConfig {
+    let config = containers::ContainerConfig {
         working_dir: "/workspace".to_string(),
         volumes: vec![],
-        named_volumes: vec![],
+
         anonymous_volumes: vec![],
         environment: vec![],
         cpu_limit: None,

@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use super::{
     get_indent, HomeView, SortMode, TerminalMode, ViewMode, ICON_COLLAPSED, ICON_DELETING,
-    ICON_ERROR, ICON_EXPANDED, ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_USER_ACTIVE,
-    ICON_WAITING,
+    ICON_ERROR, ICON_EXPANDED, ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_STOPPED,
+    ICON_USER_ACTIVE, ICON_WAITING,
 };
 use crate::session::{Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
@@ -145,20 +145,15 @@ impl HomeView {
             return;
         }
 
-        let indices: Vec<usize> = if let Some(ref filtered) = self.filtered_items {
-            filtered.clone()
-        } else {
-            (0..self.flat_items.len()).collect()
-        };
-
-        let list_items: Vec<ListItem> = indices
+        let list_items: Vec<ListItem> = self
+            .flat_items
             .iter()
             .enumerate()
-            .filter_map(|(display_idx, &item_idx)| {
-                self.flat_items.get(item_idx).map(|item| {
-                    let is_selected = display_idx == self.cursor;
-                    self.render_item(item, is_selected, theme)
-                })
+            .map(|(idx, item)| {
+                let is_selected = idx == self.cursor;
+                let is_match =
+                    !self.search_matches.is_empty() && self.search_matches.contains(&idx);
+                self.render_item(item, is_selected, is_match, theme)
             })
             .collect();
 
@@ -199,11 +194,28 @@ impl HomeView {
                 spans.push(Span::styled(after, text_style));
             }
 
+            if !self.search_matches.is_empty() {
+                let count_text = format!(
+                    " [{}/{}]",
+                    self.search_match_index + 1,
+                    self.search_matches.len()
+                );
+                spans.push(Span::styled(count_text, Style::default().fg(theme.dimmed)));
+            } else if !value.is_empty() {
+                spans.push(Span::styled(" [0/0]", Style::default().fg(theme.dimmed)));
+            }
+
             frame.render_widget(Paragraph::new(Line::from(spans)), search_area);
         }
     }
 
-    fn render_item(&self, item: &Item, is_selected: bool, theme: &Theme) -> ListItem<'_> {
+    fn render_item(
+        &self,
+        item: &Item,
+        is_selected: bool,
+        is_match: bool,
+        theme: &Theme,
+    ) -> ListItem<'_> {
         let indent = get_indent(item.depth());
 
         use std::borrow::Cow;
@@ -238,6 +250,7 @@ impl HomeView {
                                 Status::Running => ICON_RUNNING,
                                 Status::Waiting => ICON_WAITING,
                                 Status::Idle => ICON_IDLE,
+                                Status::Stopped => ICON_STOPPED,
                                 Status::Error => ICON_ERROR,
                                 Status::Starting => ICON_STARTING,
                                 Status::Deleting => ICON_DELETING,
@@ -246,6 +259,7 @@ impl HomeView {
                                 Status::Running => theme.running,
                                 Status::Waiting => theme.waiting,
                                 Status::Idle => theme.idle,
+                                Status::Stopped => theme.dimmed,
                                 Status::Error => theme.error,
                                 Status::Starting => theme.dimmed,
                                 Status::Deleting => theme.waiting,
@@ -291,7 +305,12 @@ impl HomeView {
 
         let mut line_spans = Vec::with_capacity(6);
         line_spans.push(Span::raw(indent));
-        line_spans.push(Span::styled(format!("{} ", icon), style));
+        let icon_style = if is_match {
+            Style::default().fg(theme.search)
+        } else {
+            style
+        };
+        line_spans.push(Span::styled(format!("{} ", icon), icon_style));
 
         // User-active indicator column (fixed width for alignment)
         if let Item::Session { id, .. } = item {
@@ -328,7 +347,7 @@ impl HomeView {
                 if let Some(wt_info) = &inst.worktree_info {
                     line_spans.push(Span::styled(
                         format!("  {}", wt_info.branch),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(theme.branch),
                     ));
                 }
                 if inst.is_sandboxed() {
@@ -336,7 +355,7 @@ impl HomeView {
                         ViewMode::Agent => {
                             line_spans.push(Span::styled(
                                 " [sandbox]",
-                                Style::default().fg(Color::Magenta),
+                                Style::default().fg(theme.sandbox),
                             ));
                         }
                         ViewMode::Terminal => {
@@ -346,7 +365,7 @@ impl HomeView {
                                 TerminalMode::Host => " [host]",
                             };
                             line_spans
-                                .push(Span::styled(mode_text, Style::default().fg(Color::Magenta)));
+                                .push(Span::styled(mode_text, Style::default().fg(theme.sandbox)));
                         }
                     }
                 }

@@ -4,6 +4,7 @@
 //! They're separated from main.rs so xtask can generate documentation.
 
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 
 use super::add::AddArgs;
 use super::group::GroupCommands;
@@ -12,6 +13,7 @@ use super::list::ListArgs;
 use super::profile::ProfileCommands;
 use super::remove::RemoveArgs;
 use super::session::SessionCommands;
+use super::sounds::SoundsCommands;
 use super::status::StatusArgs;
 use super::tmux::TmuxCommands;
 use super::uninstall::UninstallArgs;
@@ -86,6 +88,19 @@ pub enum Commands {
         command: TmuxCommands,
     },
 
+    /// Manage sound effects for agent state transitions
+    Sounds {
+        #[command(subcommand)]
+        command: SoundsCommands,
+    },
+
     /// Uninstall Agent of Empires
     Uninstall(UninstallArgs),
+
+    /// Generate shell completions
+    Completion {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }

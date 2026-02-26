@@ -3,7 +3,7 @@ members = [".", "xtask"]
 
 [package]
 name = "agent-of-empires"
-version = "0.10.1"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.74"
 authors = ["Agent of Empires Contributors"]
@@ -16,6 +16,7 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
 
 # TUI
 ratatui = { version = "0.29", features = ["crossterm"] }
@@ -29,13 +30,13 @@ tokio = { version = "1.42", features = ["full"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "0.9"
 
 # File watching
-notify = "7.0"
+notify = "8.2"
 
 # PTY handling
-portable-pty = "0.8"
+portable-pty = "0.9"
 
 # Fuzzy matching
 nucleo-matcher = "0.3"
@@ -51,17 +52,17 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4"] }
 
 # Random
-rand = "0.8"
+rand = "0.9"
 
 # Directory utilities
-dirs = "5.0"
+dirs = "6.0"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # HTTP client (for updates)
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 # Unix sockets
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -70,7 +71,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 cfg-if = "1.0"
 
 # Process handling
-nix = { version = "0.29", features = ["signal", "process"] }
+nix = { version = "0.31", features = ["signal", "process"] }
 
 # Unicode width
 unicode-width = "0.2"
@@ -79,7 +80,8 @@ unicode-width = "0.2"
 regex = "1.10"
 
 # Git operations
-git2 = { version = "0.19", features = ["vendored-openssl"] }
+git2 = { version = "0.20", features = ["vendored-openssl"] }
+enum_dispatch = "0.3.13"
 
 # Diff computation
 similar = "2.6"

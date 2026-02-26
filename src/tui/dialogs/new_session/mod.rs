@@ -5,17 +5,19 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::DialogResult;
-use crate::docker;
+use crate::containers::{self, ContainerRuntimeInterface};
+use crate::session::config::{DefaultTerminalMode, SandboxConfig};
 use crate::session::repo_config::HookProgress;
 #[cfg(test)]
 use crate::session::Config;
 use crate::session::{civilizations, resolve_config};
 use crate::tmux::AvailableTools;
+use crate::tui::components::{DirPicker, DirPickerResult, ListPicker, ListPickerResult};
 
 pub(super) struct FieldHelp {
     pub(super) name: &'static str,
@@ -34,16 +36,17 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
         description: "Working directory for the session",
     },
     FieldHelp {
-        name: "Group",
-        description: "Optional grouping for organization",
-    },
-    FieldHelp {
         name: "Tool",
         description: "Which AI tool to use",
     },
     FieldHelp {
+        name: "YOLO Mode",
+        description:
+            "Skip permission prompts for autonomous operation (--dangerously-skip-permissions)",
+    },
+    FieldHelp {
         name: "Worktree Branch",
-        description: "Branch name for git worktree",
+        description: "Branch name for git worktree (Ctrl+P to browse existing branches)",
     },
     FieldHelp {
         name: "New Branch",
@@ -59,17 +62,20 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
         description: "Docker image. Edit config.toml [sandbox] default_image to change default",
     },
     FieldHelp {
-        name: "YOLO Mode",
-        description:
-            "Skip permission prompts for autonomous operation (--dangerously-skip-permissions)",
-    },
-    FieldHelp {
         name: "Environment",
         description: "Env var names to pass from host to container (extends global config)",
     },
     FieldHelp {
         name: "Environment Values",
         description: "Custom KEY=VALUE env vars injected into the sandbox container",
+    },
+    FieldHelp {
+        name: "Inherited Settings",
+        description: "Read-only view of sandbox settings from global/profile config",
+    },
+    FieldHelp {
+        name: "Group",
+        description: "Optional grouping for organization (Ctrl+P to browse existing groups)",
     },
 ];
 
@@ -125,6 +131,14 @@ pub struct NewSessionDialog {
     pub(super) env_values_selected_index: usize,
     pub(super) env_values_editing_input: Option<Input>,
     pub(super) env_values_adding_new: bool,
+    /// Whether the inherited settings section is expanded.
+    pub(super) inherited_expanded: bool,
+    /// Pre-computed label/value pairs for non-default inherited sandbox settings.
+    pub(super) inherited_settings: Vec<(String, String)>,
+    pub(super) existing_groups: Vec<String>,
+    pub(super) group_picker: ListPicker,
+    pub(super) branch_picker: ListPicker,
+    pub(super) dir_picker: DirPicker,
     pub(super) error_message: Option<String>,
     pub(super) show_help: bool,
     /// Whether the dialog is in loading state (creating session in background)
@@ -229,14 +243,49 @@ fn handle_editable_list_key(
     }
 }
 
+/// Build label/value pairs for non-default inherited sandbox settings.
+fn build_inherited_settings(sandbox: &SandboxConfig) -> Vec<(String, String)> {
+    let mut settings = Vec::new();
+    if sandbox.mount_ssh {
+        settings.push(("Mount SSH".to_string(), "yes".to_string()));
+    }
+    if !sandbox.extra_volumes.is_empty() {
+        settings.push((
+            "Extra Volumes".to_string(),
+            format!("{} items", sandbox.extra_volumes.len()),
+        ));
+    }
+    if !sandbox.volume_ignores.is_empty() {
+        settings.push((
+            "Volume Ignores".to_string(),
+            format!("{} items", sandbox.volume_ignores.len()),
+        ));
+    }
+    if let Some(ref cpu) = sandbox.cpu_limit {
+        settings.push(("CPU Limit".to_string(), cpu.clone()));
+    }
+    if let Some(ref mem) = sandbox.memory_limit {
+        settings.push(("Memory Limit".to_string(), mem.clone()));
+    }
+    if sandbox.default_terminal_mode == DefaultTerminalMode::Container {
+        settings.push(("Terminal Mode".to_string(), "container".to_string()));
+    }
+    settings
+}
+
 impl NewSessionDialog {
-    pub fn new(tools: AvailableTools, existing_titles: Vec<String>, profile: &str) -> Self {
+    pub fn new(
+        tools: AvailableTools,
+        existing_titles: Vec<String>,
+        existing_groups: Vec<String>,
+        profile: &str,
+    ) -> Self {
         let current_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
         let available_tools = tools.available_list();
-        let docker_available = docker::is_docker_available();
+        let docker_available = containers::get_container_runtime().is_available();
 
         // Load resolved config (global merged with profile overrides)
         let config = resolve_config(profile).unwrap_or_default();
@@ -253,19 +302,20 @@ impl NewSessionDialog {
 
         // Apply sandbox defaults from config
         let sandbox_enabled = docker_available && config.sandbox.enabled_by_default;
-        let yolo_mode = sandbox_enabled && config.sandbox.yolo_mode_default;
+        let yolo_mode = config.session.yolo_mode_default;
 
-        // Initialize env keys and values from config when sandbox is enabled
-        let (extra_env_keys, extra_env_values) = if sandbox_enabled {
+        // Initialize env keys, values, and inherited settings from config when sandbox is enabled
+        let (extra_env_keys, extra_env_values, inherited_settings) = if sandbox_enabled {
             let env_values: Vec<String> = config
                 .sandbox
                 .environment_values
                 .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
-            (config.sandbox.environment.clone(), env_values)
+            let inherited = build_inherited_settings(&config.sandbox);
+            (config.sandbox.environment.clone(), env_values, inherited)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
 
         Self {
@@ -277,10 +327,16 @@ impl NewSessionDialog {
             focused_field: 0,
             available_tools,
             existing_titles,
+            existing_groups,
+            group_picker: ListPicker::new("Select Group"),
+            branch_picker: ListPicker::new("Select Branch"),
+            dir_picker: DirPicker::new(),
             worktree_branch: Input::default(),
             create_new_branch: true,
             sandbox_enabled,
-            sandbox_image: Input::new(docker::effective_default_image()),
+            sandbox_image: Input::new(
+                containers::get_container_runtime().effective_default_image(),
+            ),
             docker_available,
             yolo_mode,
             extra_env_keys,
@@ -293,6 +349,8 @@ impl NewSessionDialog {
             env_values_selected_index: 0,
             env_values_editing_input: None,
             env_values_adding_new: false,
+            inherited_expanded: false,
+            inherited_settings,
             error_message: None,
             show_help: false,
             loading: false,
@@ -332,7 +390,8 @@ impl NewSessionDialog {
             // Check if image pull will be needed (only relevant for sandbox sessions)
             if self.sandbox_enabled {
                 let image = self.sandbox_image.value().trim();
-                self.needs_image_pull = !docker::image_exists_locally(image);
+                self.needs_image_pull =
+                    !containers::get_container_runtime().image_exists_locally(image);
             }
         }
     }
@@ -367,10 +426,16 @@ impl NewSessionDialog {
             focused_field: 0,
             available_tools: tools,
             existing_titles: Vec::new(),
+            existing_groups: Vec::new(),
+            group_picker: ListPicker::new("Select Group"),
+            branch_picker: ListPicker::new("Select Branch"),
+            dir_picker: DirPicker::new(),
             worktree_branch: Input::default(),
             create_new_branch: true,
             sandbox_enabled: false,
-            sandbox_image: Input::new(docker::effective_default_image()),
+            sandbox_image: Input::new(
+                containers::get_container_runtime().effective_default_image(),
+            ),
             docker_available: false,
             yolo_mode: false,
             extra_env_keys: Vec::new(),
@@ -383,6 +448,8 @@ impl NewSessionDialog {
             env_values_selected_index: 0,
             env_values_editing_input: None,
             env_values_adding_new: false,
+            inherited_expanded: false,
+            inherited_settings: Vec::new(),
             error_message: None,
             show_help: false,
             loading: false,
@@ -408,10 +475,16 @@ impl NewSessionDialog {
             focused_field: 0,
             available_tools: tools,
             existing_titles: Vec::new(),
+            existing_groups: Vec::new(),
+            group_picker: ListPicker::new("Select Group"),
+            branch_picker: ListPicker::new("Select Branch"),
+            dir_picker: DirPicker::new(),
             worktree_branch: Input::default(),
             create_new_branch: true,
             sandbox_enabled: false,
-            sandbox_image: Input::new(docker::effective_default_image()),
+            sandbox_image: Input::new(
+                containers::get_container_runtime().effective_default_image(),
+            ),
             docker_available: false,
             yolo_mode: false,
             extra_env_keys: Vec::new(),
@@ -424,6 +497,8 @@ impl NewSessionDialog {
             env_values_selected_index: 0,
             env_values_editing_input: None,
             env_values_adding_new: false,
+            inherited_expanded: false,
+            inherited_settings: Vec::new(),
             error_message: None,
             show_help: false,
             loading: false,
@@ -538,56 +613,90 @@ impl NewSessionDialog {
             return DialogResult::Continue;
         }
 
+        if self.group_picker.is_active() {
+            if let ListPickerResult::Selected(value) = self.group_picker.handle_key(key) {
+                self.group = Input::new(value);
+            }
+            return DialogResult::Continue;
+        }
+
+        if self.branch_picker.is_active() {
+            if let ListPickerResult::Selected(value) = self.branch_picker.handle_key(key) {
+                self.worktree_branch = Input::new(value);
+            }
+            return DialogResult::Continue;
+        }
+
+        if self.dir_picker.is_active() {
+            match self.dir_picker.handle_key(key) {
+                DirPickerResult::Selected(path) => {
+                    self.path = Input::new(path);
+                }
+                DirPickerResult::Cancelled | DirPickerResult::Continue => {}
+            }
+            return DialogResult::Continue;
+        }
+
         let has_tool_selection = self.available_tools.len() > 1;
         let has_sandbox = self.docker_available;
         let has_worktree = !self.worktree_branch.value().is_empty();
         let sandbox_options_visible = has_sandbox && self.sandbox_enabled;
-        // Fields: title(0), path(1), group(2), [tool(3)], worktree(3/4), [new_branch(4/5)], [sandbox(5/6)], [image(6/7)], [yolo(7/8)], [env(8/9)]
-        let tool_field = if has_tool_selection { 3 } else { usize::MAX };
-        let worktree_field = if has_tool_selection { 4 } else { 3 };
+        // Field order: title(0), path(1), [tool(2)], yolo, worktree,
+        //   [new_branch], [sandbox], [image, env, env_values, inherited], group
+        // INVARIANT: sandbox sub-options (image, env, env_values, inherited) must be
+        // contiguous and immediately after the sandbox checkbox. Toggling sandbox off
+        // hides them as a group and clamps focus to sandbox_field.
+        let tool_field = if has_tool_selection { 2 } else { usize::MAX };
+        let yolo_mode_field = if has_tool_selection { 3 } else { 2 };
+        let worktree_field = yolo_mode_field + 1;
         let new_branch_field = if has_worktree {
             worktree_field + 1
         } else {
             usize::MAX
         };
-        let sandbox_field = if has_sandbox {
-            if has_worktree {
-                new_branch_field + 1
-            } else {
-                worktree_field + 1
-            }
-        } else {
-            usize::MAX
-        };
-        let sandbox_image_field = if sandbox_options_visible {
-            sandbox_field + 1
-        } else {
-            usize::MAX
-        };
-        let yolo_mode_field = if sandbox_options_visible {
-            sandbox_image_field + 1
-        } else {
-            usize::MAX
-        };
-        let env_field = if sandbox_options_visible {
-            yolo_mode_field + 1
-        } else {
-            usize::MAX
-        };
-        let env_values_field = if sandbox_options_visible {
-            env_field + 1
-        } else {
-            usize::MAX
-        };
-        let max_field = if sandbox_options_visible {
-            env_values_field + 1
-        } else if has_sandbox {
-            sandbox_field + 1
-        } else if has_worktree {
+        let mut next = if has_worktree {
             new_branch_field + 1
         } else {
             worktree_field + 1
         };
+        let sandbox_field = if has_sandbox {
+            let f = next;
+            next += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let _sandbox_image_field = if sandbox_options_visible {
+            let f = next;
+            next += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let env_field = if sandbox_options_visible {
+            let f = next;
+            next += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let env_values_field = if sandbox_options_visible {
+            let f = next;
+            next += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let inherited_field = if sandbox_options_visible {
+            let f = next;
+            next += 1;
+            f
+        } else {
+            usize::MAX
+        };
+        let group_field = next;
+        next += 1;
+        let max_field = next;
 
         // Handle path suggestions navigation when shown
         if self.show_path_suggestions && self.focused_field == 1 {
@@ -636,6 +745,28 @@ impl NewSessionDialog {
             return self.handle_env_values_list_key(key);
         }
 
+        // Ctrl+P opens a context-sensitive picker
+        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.focused_field == 1 {
+                let path_value = self.path.value().trim().to_string();
+                self.dir_picker.activate(&path_value);
+                return DialogResult::Continue;
+            }
+            if self.focused_field == group_field && !self.existing_groups.is_empty() {
+                self.group_picker.activate(self.existing_groups.clone());
+                return DialogResult::Continue;
+            }
+            if self.focused_field == worktree_field {
+                let path = std::path::Path::new(self.path.value().trim());
+                if let Ok(branches) = crate::git::diff::list_branches(path) {
+                    if !branches.is_empty() {
+                        self.branch_picker.activate(branches);
+                    }
+                }
+                return DialogResult::Continue;
+            }
+        }
+
         match key.code {
             KeyCode::Char('?') => {
                 self.show_help = true;
@@ -679,7 +810,7 @@ impl NewSessionDialog {
                     create_new_branch: self.create_new_branch,
                     sandbox: self.sandbox_enabled,
                     sandbox_image: self.sandbox_image.value().trim().to_string(),
-                    yolo_mode: self.sandbox_enabled && self.yolo_mode,
+                    yolo_mode: self.yolo_mode,
                     extra_env_keys: if self.sandbox_enabled {
                         self.extra_env_keys.clone()
                     } else {
@@ -723,9 +854,8 @@ impl NewSessionDialog {
             {
                 self.sandbox_enabled = !self.sandbox_enabled;
                 if self.sandbox_enabled {
-                    // Apply yolo_mode_default and reload env keys/values from config
+                    // Reload env keys/values from config
                     let config = resolve_config(&self.profile).unwrap_or_default();
-                    self.yolo_mode = config.sandbox.yolo_mode_default;
                     self.extra_env_keys = config.sandbox.environment.clone();
                     self.extra_env_values = config
                         .sandbox
@@ -733,14 +863,17 @@ impl NewSessionDialog {
                         .iter()
                         .map(|(k, v)| format!("{}={}", k, v))
                         .collect();
+                    self.inherited_settings = build_inherited_settings(&config.sandbox);
                 } else {
-                    self.yolo_mode = false;
                     self.extra_env_keys.clear();
                     self.env_list_expanded = false;
                     self.env_editing_input = None;
                     self.extra_env_values.clear();
                     self.env_values_list_expanded = false;
                     self.env_values_editing_input = None;
+                    self.inherited_expanded = false;
+                    self.inherited_settings.clear();
+                    // Clamp focused_field if we were on a sandbox sub-option
                     if self.focused_field > sandbox_field {
                         self.focused_field = sandbox_field;
                     }
@@ -753,6 +886,12 @@ impl NewSessionDialog {
                 self.yolo_mode = !self.yolo_mode;
                 DialogResult::Continue
             }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if self.focused_field == inherited_field =>
+            {
+                self.inherited_expanded = !self.inherited_expanded;
+                DialogResult::Continue
+            }
             _ => {
                 if self.focused_field != tool_field
                     && self.focused_field != new_branch_field
@@ -760,6 +899,7 @@ impl NewSessionDialog {
                     && self.focused_field != yolo_mode_field
                     && self.focused_field != env_field
                     && self.focused_field != env_values_field
+                    && self.focused_field != inherited_field
                 {
                     let was_path_field = self.focused_field == 1;
                     self.current_input_mut()
@@ -807,34 +947,41 @@ impl NewSessionDialog {
     fn current_input_mut(&mut self) -> &mut Input {
         let has_tool_selection = self.available_tools.len() > 1;
         let has_worktree = !self.worktree_branch.value().is_empty();
+        let sandbox_options_visible = self.docker_available && self.sandbox_enabled;
 
-        let worktree_field = if has_tool_selection { 4 } else { 3 };
+        let yolo_mode_field = if has_tool_selection { 3 } else { 2 };
+        let worktree_field = yolo_mode_field + 1;
         let new_branch_field = if has_worktree {
             worktree_field + 1
         } else {
             usize::MAX
         };
-        let sandbox_field = if self.docker_available {
-            if has_worktree {
-                new_branch_field + 1
-            } else {
-                worktree_field + 1
-            }
+        let mut next = if has_worktree {
+            new_branch_field + 1
+        } else {
+            worktree_field + 1
+        };
+        if self.docker_available {
+            next += 1; // sandbox checkbox
+        }
+        let sandbox_image_field = if sandbox_options_visible {
+            let f = next;
+            next += 1;
+            f
         } else {
             usize::MAX
         };
-        let sandbox_image_field = if self.docker_available && self.sandbox_enabled {
-            sandbox_field + 1
-        } else {
-            usize::MAX
-        };
+        if sandbox_options_visible {
+            next += 3; // env, env_values, inherited
+        }
+        let group_field = next;
 
         match self.focused_field {
             0 => &mut self.title,
             1 => &mut self.path,
-            2 => &mut self.group,
             n if n == worktree_field => &mut self.worktree_branch,
             n if n == sandbox_image_field => &mut self.sandbox_image,
+            n if n == group_field => &mut self.group,
             _ => &mut self.title,
         }
     }

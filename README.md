@@ -2,12 +2,13 @@
   <img src="assets/logo.png" alt="Agent of Empires" width="128">
   <h1 align="center">Agent of Empires (AoE)</h1>
   <p align="center">
-    <a href="https://njbrake.github.io/agent-of-empires/"><img src="https://img.shields.io/badge/docs-aoe-blue" alt="Documentation"></a>
     <a href="https://github.com/njbrake/agent-of-empires/actions/workflows/ci.yml"><img src="https://github.com/njbrake/agent-of-empires/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
     <a href="https://github.com/njbrake/agent-of-empires/releases"><img src="https://img.shields.io/github/v/release/njbrake/agent-of-empires" alt="GitHub release"></a>
-    <a href="https://blog.rust-lang.org/2023/11/16/Rust-1.74.0.html"><img src="https://img.shields.io/badge/MSRV-1.74-blue?logo=rust" alt="MSRV"></a>
-    <a href="https://github.com/njbrake/agent-of-empires/stargazers"><img src="https://img.shields.io/github/stars/njbrake/agent-of-empires?style=social" alt="GitHub stars"></a>
+    <a href="https://formulae.brew.sh/formula/aoe"><img src="https://img.shields.io/homebrew/v/aoe" alt="Homebrew"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+    <br>
+    <a href="https://www.youtube.com/@agent-of-empires"><img src="https://img.shields.io/badge/YouTube-channel-red?logo=youtube" alt="YouTube"></a>
+    <a href="https://x.com/natebrake"><img src="https://img.shields.io/badge/follow-%40natebrake-black?logo=x&logoColor=white" alt="Follow @natebrake"></a>
   </p>
 </p>
 
@@ -21,7 +22,7 @@ Run multiple AI agents in parallel across different branches of your codebase, e
 
 ## Features
 
-- **Multi-agent support** -- Claude Code, OpenCode, Mistral Vibe, Codex CLI, and Gemini CLI
+- **Multi-agent support** -- Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, and Cursor CLI
 - **TUI dashboard** -- visual interface to create, monitor, and manage sessions
 - **Agent + terminal views** -- toggle between your AI agents and paired shell terminals with `t`
 - **Status detection** -- see which agents are running, waiting for input, or idle
@@ -49,7 +50,10 @@ curl -fsSL \
   | bash
 
 # Homebrew
-brew install njbrake/aoe/aoe
+brew install aoe
+
+# Nix
+nix run github:njbrake/agent-of-empires
 
 # Build from source
 git clone https://github.com/njbrake/agent-of-empires
@@ -92,7 +96,7 @@ Nothing. Sessions are tmux sessions running in the background. Open and close `a
 
 ### Which AI tools are supported?
 
-Claude Code, OpenCode, Mistral Vibe, Codex CLI, and Gemini CLI. AoE auto-detects which are installed on your system.
+Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, and Cursor CLI. AoE auto-detects which are installed on your system.
 
 ## Troubleshooting
 
@@ -124,9 +128,17 @@ cargo build --release  # Release build
 AGENT_OF_EMPIRES_DEBUG=1 cargo run
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=njbrake/agent-of-empires&type=date&legend=top-left)](https://www.star-history.com/#njbrake/agent-of-empires&type=date&legend=top-left)
+
 ## Acknowledgments
 
 Inspired by [agent-deck](https://github.com/asheshgoplani/agent-deck) (Go + Bubble Tea).
+
+## Author
+
+Created by [Nate Brake](https://x.com/natebrake) ([@natebrake](https://x.com/natebrake))
 
 ## License
 

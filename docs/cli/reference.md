@@ -16,6 +16,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session restart`↴](#aoe-session-restart)
 * [`aoe session attach`↴](#aoe-session-attach)
 * [`aoe session show`↴](#aoe-session-show)
+* [`aoe session rename`↴](#aoe-session-rename)
 * [`aoe session current`↴](#aoe-session-current)
 * [`aoe group`↴](#aoe-group)
 * [`aoe group list`↴](#aoe-group-list)
@@ -33,11 +34,16 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe worktree cleanup`↴](#aoe-worktree-cleanup)
 * [`aoe tmux`↴](#aoe-tmux)
 * [`aoe tmux status`↴](#aoe-tmux-status)
+* [`aoe sounds`↴](#aoe-sounds)
+* [`aoe sounds install`↴](#aoe-sounds-install)
+* [`aoe sounds list`↴](#aoe-sounds-list)
+* [`aoe sounds test`↴](#aoe-sounds-test)
 * [`aoe uninstall`↴](#aoe-uninstall)
+* [`aoe completion`↴](#aoe-completion)
 
 ## `aoe`
 
-Agent of Empires (aoe) is a terminal session manager that uses tmux to help you manage and monitor AI coding agents like Claude Code and OpenCode.
+Agent of Empires (aoe) is a terminal session manager that uses tmux to help you manage and monitor AI coding agents like Claude Code, OpenCode, and Cursor CLI.
 
 Run without arguments to launch the TUI dashboard.
 
@@ -55,7 +61,9 @@ Run without arguments to launch the TUI dashboard.
 * `profile` — Manage profiles (separate workspaces)
 * `worktree` — Manage git worktrees for parallel development
 * `tmux` — tmux integration utilities
+* `sounds` — Manage sound effects for agent state transitions
 * `uninstall` — Uninstall Agent of Empires
+* `completion` — Generate shell completions
 
 ###### **Options:**
 
@@ -79,7 +87,7 @@ Add a new session
 
 * `-t`, `--title <TITLE>` — Session title (defaults to folder name)
 * `-g`, `--group <GROUP>` — Group path (defaults to parent folder)
-* `-c`, `--cmd <COMMAND>` — Command to run (e.g., 'claude', 'opencode', 'vibe', 'codex', 'gemini')
+* `-c`, `--cmd <COMMAND>` — Command to run (e.g., 'claude', 'opencode', 'vibe', 'codex', 'gemini', 'cursor')
 * `-P`, `--parent <PARENT>` — Parent session (creates sub-session, inherits group)
 * `-l`, `--launch` — Launch the session immediately after creating
 * `-w`, `--worktree <WORKTREE_BRANCH>` — Create session in a git worktree for the specified branch
@@ -161,6 +169,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `restart` — Restart session
 * `attach` — Attach to session interactively
 * `show` — Show session details
+* `rename` — Rename a session
 * `current` — Auto-detect current session
 
 
@@ -226,6 +235,23 @@ Show session details
 ###### **Options:**
 
 * `--json` — Output as JSON
+
+
+
+## `aoe session rename`
+
+Rename a session
+
+**Usage:** `aoe session rename [OPTIONS] [IDENTIFIER]`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Session ID or title (optional, auto-detects in tmux)
+
+###### **Options:**
+
+* `-t`, `--title <TITLE>` — New title for the session
+* `-g`, `--group <GROUP>` — New group for the session (empty string to ungroup)
 
 
 
@@ -447,6 +473,48 @@ Add this to your ~/.tmux.conf: set -g status-right "#(aoe tmux status)"
 
 
 
+## `aoe sounds`
+
+Manage sound effects for agent state transitions
+
+**Usage:** `aoe sounds <COMMAND>`
+
+###### **Subcommands:**
+
+* `install` — Install bundled sound effects
+* `list` — List currently installed sounds
+* `test` — Test a sound by playing it
+
+
+
+## `aoe sounds install`
+
+Install bundled sound effects
+
+**Usage:** `aoe sounds install`
+
+
+
+## `aoe sounds list`
+
+List currently installed sounds
+
+**Usage:** `aoe sounds list`
+
+
+
+## `aoe sounds test`
+
+Test a sound by playing it
+
+**Usage:** `aoe sounds test <NAME>`
+
+###### **Arguments:**
+
+* `<NAME>` — Sound file name (without extension)
+
+
+
 ## `aoe uninstall`
 
 Uninstall Agent of Empires
@@ -459,6 +527,21 @@ Uninstall Agent of Empires
 * `--keep-tmux-config` — Keep tmux configuration
 * `--dry-run` — Show what would be removed without removing
 * `-y` — Skip confirmation prompts
+
+
+
+## `aoe completion`
+
+Generate shell completions
+
+**Usage:** `aoe completion <SHELL>`
+
+###### **Arguments:**
+
+* `<SHELL>` — Shell to generate completions for
+
+  Possible values: `bash`, `elvish`, `fish`, `powershell`, `zsh`
+
 
 
 

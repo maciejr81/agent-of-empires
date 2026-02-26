@@ -3,32 +3,33 @@
 pub mod builder;
 pub mod civilizations;
 pub mod config;
+mod container_config;
+mod environment;
 mod groups;
 mod instance;
 pub mod profile_config;
 pub mod repo_config;
 mod storage;
 
+pub use crate::sound::{SoundConfig, SoundConfigOverride};
 pub use config::{
     get_claude_config_dir, get_update_settings, load_config, save_config, ClaudeConfig, Config,
-    DefaultTerminalMode, SandboxConfig, SessionConfig, ThemeConfig, TmuxMouseMode,
-    TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
+    ContainerRuntimeName, DefaultTerminalMode, SandboxConfig, SessionConfig, ThemeConfig,
+    TmuxMouseMode, TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
 };
 pub use groups::{flatten_tree, Group, GroupTree, Item};
-pub use instance::{
-    Instance, SandboxInfo, Status, TerminalInfo, WorktreeInfo, SUPPORTED_TOOLS,
-    YOLO_SUPPORTED_TOOLS,
-};
+pub use instance::{Instance, SandboxInfo, Status, TerminalInfo, WorktreeInfo};
 pub use profile_config::{
     load_profile_config, merge_configs, resolve_config, save_profile_config,
     validate_check_interval, validate_memory_limit, validate_path_exists, validate_volume_format,
-    ClaudeConfigOverride, ProfileConfig, SandboxConfigOverride, SessionConfigOverride,
-    ThemeConfigOverride, TmuxConfigOverride, UpdatesConfigOverride, WorktreeConfigOverride,
+    ClaudeConfigOverride, HooksConfigOverride, ProfileConfig, SandboxConfigOverride,
+    SessionConfigOverride, ThemeConfigOverride, TmuxConfigOverride, UpdatesConfigOverride,
+    WorktreeConfigOverride,
 };
 pub use repo_config::{
     check_hook_trust, execute_hooks, execute_hooks_in_container, load_repo_config,
-    merge_repo_config, resolve_config_with_repo, trust_repo, HookTrustStatus, HooksConfig,
-    RepoConfig,
+    merge_repo_config, profile_to_repo_config, repo_config_to_profile, resolve_config_with_repo,
+    save_repo_config, trust_repo, HookTrustStatus, HooksConfig, RepoConfig,
 };
 pub use storage::Storage;
 

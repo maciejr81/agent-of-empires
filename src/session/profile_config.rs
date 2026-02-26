@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 
-use super::config::{Config, DefaultTerminalMode, TmuxMouseMode, TmuxStatusBarMode};
+use super::config::{
+    Config, ContainerRuntimeName, DefaultTerminalMode, TmuxMouseMode, TmuxStatusBarMode,
+};
 use super::get_profile_dir;
 
 /// Profile-specific settings. All fields are Option<T> - None means "inherit from global"
@@ -34,6 +36,12 @@ pub struct ProfileConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionConfigOverride>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfigOverride>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<crate::sound::SoundConfigOverride>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -90,9 +98,6 @@ pub struct SandboxConfigOverride {
     pub enabled_by_default: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo_mode_default: Option<bool>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_image: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +123,15 @@ pub struct SandboxConfigOverride {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_ignores: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_ssh: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_instruction: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_runtime: Option<ContainerRuntimeName>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -133,6 +147,18 @@ pub struct TmuxConfigOverride {
 pub struct SessionConfigOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_tool: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_mode_default: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HooksConfigOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_launch: Option<Vec<String>>,
 }
 
 /// Load profile-specific config. Returns empty config if file doesn't exist.
@@ -171,6 +197,8 @@ pub fn profile_has_overrides(config: &ProfileConfig) -> bool {
         || config.sandbox.is_some()
         || config.tmux.is_some()
         || config.session.is_some()
+        || config.hooks.is_some()
+        || config.sound.is_some()
 }
 
 /// Load effective config for a profile (global + profile overrides merged)
@@ -187,9 +215,6 @@ pub fn apply_sandbox_overrides(
 ) {
     if let Some(enabled_by_default) = source.enabled_by_default {
         target.enabled_by_default = enabled_by_default;
-    }
-    if let Some(yolo_mode_default) = source.yolo_mode_default {
-        target.yolo_mode_default = yolo_mode_default;
     }
     if let Some(ref default_image) = source.default_image {
         target.default_image = default_image.clone();
@@ -218,6 +243,15 @@ pub fn apply_sandbox_overrides(
     if let Some(ref volume_ignores) = source.volume_ignores {
         target.volume_ignores = volume_ignores.clone();
     }
+    if let Some(mount_ssh) = source.mount_ssh {
+        target.mount_ssh = mount_ssh;
+    }
+    if let Some(ref custom_instruction) = source.custom_instruction {
+        target.custom_instruction = Some(custom_instruction.clone());
+    }
+    if let Some(container_runtime) = source.container_runtime {
+        target.container_runtime = container_runtime;
+    }
 }
 
 /// Apply worktree config overrides to a target config.
@@ -245,6 +279,19 @@ pub fn apply_worktree_overrides(
     }
 }
 
+/// Apply hooks config overrides to a target config.
+pub fn apply_hooks_overrides(
+    target: &mut crate::session::repo_config::HooksConfig,
+    source: &HooksConfigOverride,
+) {
+    if let Some(ref on_create) = source.on_create {
+        target.on_create = on_create.clone();
+    }
+    if let Some(ref on_launch) = source.on_launch {
+        target.on_launch = on_launch.clone();
+    }
+}
+
 /// Apply session config overrides to a target config.
 pub fn apply_session_overrides(
     target: &mut super::config::SessionConfig,
@@ -252,6 +299,9 @@ pub fn apply_session_overrides(
 ) {
     if source.default_tool.is_some() {
         target.default_tool = source.default_tool.clone();
+    }
+    if let Some(yolo_mode_default) = source.yolo_mode_default {
+        target.yolo_mode_default = yolo_mode_default;
     }
 }
 
@@ -308,6 +358,14 @@ pub fn merge_configs(mut global: Config, profile: &ProfileConfig) -> Config {
 
     if let Some(ref session_override) = profile.session {
         apply_session_overrides(&mut global.session, session_override);
+    }
+
+    if let Some(ref hooks_override) = profile.hooks {
+        apply_hooks_overrides(&mut global.hooks, hooks_override);
+    }
+
+    if let Some(ref sound_override) = profile.sound {
+        crate::sound::apply_sound_overrides(&mut global.sound, sound_override);
     }
 
     global
@@ -644,5 +702,28 @@ mod tests {
             deserialized.tmux.as_ref().unwrap().mouse,
             Some(TmuxMouseMode::Enabled)
         );
+    }
+
+    #[test]
+    fn test_merge_configs_with_theme_override() {
+        let global = Config::default();
+        let profile = ProfileConfig {
+            theme: Some(ThemeConfigOverride {
+                name: Some("tokyo-night".to_string()),
+            }),
+            ..Default::default()
+        };
+        let merged = merge_configs(global, &profile);
+        assert_eq!(merged.theme.name, "tokyo-night");
+    }
+
+    #[test]
+    fn test_merge_configs_theme_inherits_when_not_overridden() {
+        let mut global = Config::default();
+        global.theme.name = "catppuccin-latte".to_string();
+
+        let profile = ProfileConfig::default();
+        let merged = merge_configs(global, &profile);
+        assert_eq!(merged.theme.name, "catppuccin-latte");
     }
 }

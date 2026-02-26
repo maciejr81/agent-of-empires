@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use chrono::Utc;
 
-use crate::docker::DockerContainer;
+use crate::containers::{self, ContainerRuntimeInterface};
 use crate::git::GitWorktree;
 
 use super::{civilizations, Config, Instance, SandboxInfo, WorktreeInfo};
@@ -53,11 +53,12 @@ pub struct CreatedWorktree {
 /// if starting fails.
 pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Result<BuildResult> {
     if params.sandbox {
-        if !crate::docker::is_docker_available() {
-            bail!("Docker is not installed. Please install Docker to use sandbox mode.");
+        let runtime = containers::get_container_runtime();
+        if !runtime.is_available() {
+            bail!("Container runtime is not installed. Please install Docker or Apple Container to use sandbox mode.");
         }
-        if !crate::docker::is_daemon_running() {
-            bail!("Docker daemon is not running. Please start Docker to use sandbox mode.");
+        if !runtime.is_daemon_running() {
+            bail!("Container runtime daemon is not running. Please start Docker or Apple Container to use sandbox mode.");
         }
     }
 
@@ -147,6 +148,17 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
         }
     }
 
+    // Validate that the final path exists and is a directory.
+    // This catches cases where the user typed a non-existent path in the TUI;
+    // without this check tmux silently falls back to the home directory.
+    let final_path_buf = PathBuf::from(&final_path);
+    if !final_path_buf.exists() {
+        bail!("Project path does not exist: {}", final_path);
+    }
+    if !final_path_buf.is_dir() {
+        bail!("Project path is not a directory: {}", final_path);
+    }
+
     let final_title = if params.title.is_empty() {
         civilizations::generate_random_title(existing_titles)
     } else {
@@ -156,21 +168,20 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
     let mut instance = Instance::new(&final_title, &final_path);
     instance.group_path = params.group;
     instance.tool = params.tool.clone();
-    instance.command = match params.tool.as_str() {
-        "opencode" => "opencode".to_string(),
-        "codex" => "codex".to_string(),
-        _ => String::new(),
-    };
+    instance.command = crate::agents::get_agent(&params.tool)
+        .filter(|a| a.set_default_command)
+        .map(|a| a.binary.to_string())
+        .unwrap_or_default();
     instance.worktree_info = worktree_info;
+    instance.yolo_mode = params.yolo_mode;
 
     if params.sandbox {
         instance.sandbox_info = Some(SandboxInfo {
             enabled: true,
             container_id: None,
             image: params.sandbox_image.clone(),
-            container_name: DockerContainer::generate_name(&instance.id),
+            container_name: containers::DockerContainer::generate_name(&instance.id),
             created_at: None,
-            yolo_mode: if params.yolo_mode { Some(true) } else { None },
             extra_env_keys: if params.extra_env_keys.is_empty() {
                 None
             } else {
@@ -192,6 +203,9 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
                     Some(map)
                 }
             },
+            custom_instruction: Config::load()
+                .ok()
+                .and_then(|c| c.sandbox.custom_instruction),
         });
     }
 
@@ -210,7 +224,7 @@ pub fn build_instance(params: InstanceParams, existing_titles: &[&str]) -> Resul
 pub fn cleanup_instance(instance: &Instance, created_worktree: Option<&CreatedWorktree>) {
     if let Some(wt) = created_worktree {
         if let Ok(git_wt) = GitWorktree::new(wt.main_repo_path.clone()) {
-            if let Err(e) = git_wt.remove_worktree(&wt.path) {
+            if let Err(e) = git_wt.remove_worktree(&wt.path, false) {
                 tracing::warn!("Failed to clean up worktree: {}", e);
             }
         }
@@ -218,7 +232,7 @@ pub fn cleanup_instance(instance: &Instance, created_worktree: Option<&CreatedWo
 
     if let Some(sandbox) = &instance.sandbox_info {
         if sandbox.enabled {
-            let container = DockerContainer::from_session_id(&instance.id);
+            let container = containers::DockerContainer::from_session_id(&instance.id);
             if container.exists().unwrap_or(false) {
                 if let Err(e) = container.remove(true) {
                     tracing::warn!("Failed to clean up container: {}", e);

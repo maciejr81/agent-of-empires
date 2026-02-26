@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::Args;
 
-use crate::docker::DockerContainer;
+use crate::containers;
 use crate::session::{Config, GroupTree, Instance, Storage};
 
 #[derive(Args)]
@@ -14,6 +14,10 @@ pub struct RemoveArgs {
     /// Delete worktree directory (default: keep worktree)
     #[arg(long = "delete-worktree")]
     delete_worktree: bool,
+
+    /// Force worktree removal even with untracked/modified files
+    #[arg(long)]
+    force: bool,
 
     /// Keep container instead of deleting it (default: delete per config)
     #[arg(long = "keep-container")]
@@ -78,7 +82,7 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
 
                     match GitWorktree::new(main_repo) {
                         Ok(git_wt) => {
-                            if let Err(e) = git_wt.remove_worktree(&worktree_path) {
+                            if let Err(e) = git_wt.remove_worktree(&worktree_path, args.force) {
                                 eprintln!("Warning: failed to remove worktree: {}", e);
                                 eprintln!(
                                     "You may need to remove it manually with: git worktree remove {}",
@@ -122,7 +126,7 @@ pub async fn run(profile: &str, args: RemoveArgs) -> Result<()> {
                 if sandbox.enabled && !args.keep_container {
                     let config = Config::load().ok().unwrap_or_default();
                     if config.sandbox.auto_cleanup {
-                        let container = DockerContainer::from_session_id(&inst.id);
+                        let container = containers::DockerContainer::from_session_id(&inst.id);
                         if container.exists().unwrap_or(false) {
                             if let Err(e) = container.remove(true) {
                                 eprintln!("Warning: failed to remove container: {}", e);
