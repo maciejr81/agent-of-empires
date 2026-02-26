@@ -393,12 +393,23 @@ impl HomeView {
                         .iter()
                         .map(|g| g.path.clone())
                         .collect();
-                    self.new_dialog = Some(NewSessionDialog::new(
+                    let mut dialog = NewSessionDialog::new(
                         self.available_tools.clone(),
                         existing_titles,
                         existing_groups,
                         self.storage.profile(),
-                    ));
+                    );
+                    // Pre-fill from selected session context
+                    if let Some(id) = &self.selected_session {
+                        if let Some(inst) = self.instance_map.get(id) {
+                            dialog = dialog.with_session_context(
+                                &inst.title,
+                                &inst.project_path,
+                                &inst.group_path,
+                            );
+                        }
+                    }
+                    self.new_dialog = Some(dialog);
                 }
             }
             KeyCode::Char('N') => {

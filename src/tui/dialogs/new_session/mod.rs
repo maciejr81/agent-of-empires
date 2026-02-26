@@ -365,6 +365,50 @@ impl NewSessionDialog {
         }
     }
 
+    /// Pre-fill dialog fields from a selected session's context.
+    /// Sets the path, group, and generates an incremented title.
+    pub fn with_session_context(
+        mut self,
+        session_title: &str,
+        session_path: &str,
+        session_group: &str,
+    ) -> Self {
+        self.path = Input::new(session_path.to_string());
+        if !session_group.is_empty() {
+            self.group = Input::new(session_group.to_string());
+        }
+        let next_title = Self::next_numbered_title(session_title, &self.existing_titles);
+        self.title = Input::new(next_title);
+        self
+    }
+
+    /// Generate the next numbered title based on existing sessions.
+    /// "okra svelte" -> "okra svelte 2", "okra svelte 2" -> "okra svelte 3", etc.
+    /// Skips numbers that are already taken.
+    fn next_numbered_title(base_title: &str, existing: &[String]) -> String {
+        // Strip trailing number to get the base name
+        let (base, current_num) = if let Some(pos) = base_title.rfind(' ') {
+            let suffix = &base_title[pos + 1..];
+            if let Ok(n) = suffix.parse::<u32>() {
+                (&base_title[..pos], n)
+            } else {
+                (base_title, 1)
+            }
+        } else {
+            (base_title, 1)
+        };
+
+        // Find the next available number
+        let mut next = current_num + 1;
+        loop {
+            let candidate = format!("{} {}", base, next);
+            if !existing.iter().any(|t| t == &candidate) {
+                return candidate;
+            }
+            next += 1;
+        }
+    }
+
     /// Set whether hooks will be executed during session creation
     pub fn set_has_hooks(&mut self, has_hooks: bool) {
         self.has_hooks = has_hooks;

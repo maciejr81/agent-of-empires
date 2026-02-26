@@ -654,3 +654,55 @@ fn test_profile_override_beats_global_default_tool() {
     );
     assert_eq!(dialog.available_tools[dialog.tool_index], "opencode");
 }
+
+#[test]
+fn test_next_numbered_title_simple() {
+    let existing = vec!["okra svelte".to_string()];
+    let result = NewSessionDialog::next_numbered_title("okra svelte", &existing);
+    assert_eq!(result, "okra svelte 2");
+}
+
+#[test]
+fn test_next_numbered_title_already_numbered() {
+    let existing = vec!["okra svelte".to_string(), "okra svelte 2".to_string()];
+    let result = NewSessionDialog::next_numbered_title("okra svelte 2", &existing);
+    assert_eq!(result, "okra svelte 3");
+}
+
+#[test]
+fn test_next_numbered_title_skips_taken_numbers() {
+    let existing = vec![
+        "okra svelte".to_string(),
+        "okra svelte 2".to_string(),
+        "okra svelte 3".to_string(),
+    ];
+    let result = NewSessionDialog::next_numbered_title("okra svelte", &existing);
+    assert_eq!(result, "okra svelte 4");
+}
+
+#[test]
+fn test_next_numbered_title_gap_in_numbers() {
+    let existing = vec!["okra svelte".to_string(), "okra svelte 3".to_string()];
+    let result = NewSessionDialog::next_numbered_title("okra svelte", &existing);
+    assert_eq!(result, "okra svelte 2");
+}
+
+#[test]
+fn test_with_session_context_sets_fields() {
+    let mut dialog = single_tool_dialog();
+    dialog.existing_titles = vec!["okra svelte".to_string()];
+    dialog = dialog.with_session_context("okra svelte", "/home/user/project", "my-group");
+    assert_eq!(dialog.path.value(), "/home/user/project");
+    assert_eq!(dialog.group.value(), "my-group");
+    assert_eq!(dialog.title.value(), "okra svelte 2");
+}
+
+#[test]
+fn test_with_session_context_empty_group() {
+    let mut dialog = single_tool_dialog();
+    dialog.existing_titles = vec!["test".to_string()];
+    dialog = dialog.with_session_context("test", "/tmp", "");
+    assert_eq!(dialog.path.value(), "/tmp");
+    assert_eq!(dialog.group.value(), ""); // should stay empty
+    assert_eq!(dialog.title.value(), "test 2");
+}
