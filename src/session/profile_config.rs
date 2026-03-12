@@ -104,10 +104,10 @@ pub struct SandboxConfigOverride {
     pub extra_volumes: Option<Vec<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<Vec<String>>,
+    pub port_mappings: Option<Vec<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment_values: Option<HashMap<String, String>>,
+    pub environment: Option<Vec<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_cleanup: Option<bool>,
@@ -150,6 +150,12 @@ pub struct SessionConfigOverride {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo_mode_default: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_extra_args: Option<HashMap<String, String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_command_override: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -222,11 +228,11 @@ pub fn apply_sandbox_overrides(
     if let Some(ref extra_volumes) = source.extra_volumes {
         target.extra_volumes = extra_volumes.clone();
     }
+    if let Some(ref port_mappings) = source.port_mappings {
+        target.port_mappings = port_mappings.clone();
+    }
     if let Some(ref environment) = source.environment {
         target.environment = environment.clone();
-    }
-    if let Some(ref environment_values) = source.environment_values {
-        target.environment_values = environment_values.clone();
     }
     if let Some(auto_cleanup) = source.auto_cleanup {
         target.auto_cleanup = auto_cleanup;
@@ -302,6 +308,12 @@ pub fn apply_session_overrides(
     }
     if let Some(yolo_mode_default) = source.yolo_mode_default {
         target.yolo_mode_default = yolo_mode_default;
+    }
+    if let Some(ref args) = source.agent_extra_args {
+        target.agent_extra_args = args.clone();
+    }
+    if let Some(ref overrides) = source.agent_command_override {
+        target.agent_command_override = overrides.clone();
     }
 }
 

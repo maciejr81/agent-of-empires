@@ -5,12 +5,13 @@ use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::{HomeView, TerminalMode, ViewMode};
-use crate::session::config::{load_config, save_config};
-use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
+use crate::session::config::{load_config, save_config, SortOrder};
+use crate::session::{flatten_tree, list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, HookTrustAction,
-    InfoDialog, NewSessionData, NewSessionDialog, RenameDialog, UnifiedDeleteDialog,
+    InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction, RenameDialog,
+    UnifiedDeleteDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
@@ -170,11 +171,12 @@ impl HomeView {
                                 ) {
                                     tracing::error!("Failed to trust repo: {}", e);
                                 }
-                                let merged = self.merge_repo_hooks_onto_config(hooks);
+                                let merged =
+                                    self.merge_repo_hooks_onto_config_for(&data.profile, hooks);
                                 return self.create_session_with_hooks(data, merged);
                             }
                             HookTrustAction::Skip => {
-                                let fallback = self.resolve_global_profile_hooks();
+                                let fallback = self.resolve_global_profile_hooks_for(&data.profile);
                                 return self.create_session_with_hooks(data, fallback);
                             }
                         }
@@ -210,17 +212,17 @@ impl HomeView {
                             self.pending_hook_trust_data = Some(data);
                         }
                         Ok(repo_config::HookTrustStatus::Trusted(repo_hooks)) => {
-                            // Merge repo hooks onto global+profile hooks (per-field override)
-                            let merged = self.merge_repo_hooks_onto_config(repo_hooks);
+                            let merged =
+                                self.merge_repo_hooks_onto_config_for(&data.profile, repo_hooks);
                             return self.create_session_with_hooks(data, merged);
                         }
                         Ok(repo_config::HookTrustStatus::NoHooks) => {
-                            let fallback = self.resolve_global_profile_hooks();
+                            let fallback = self.resolve_global_profile_hooks_for(&data.profile);
                             return self.create_session_with_hooks(data, fallback);
                         }
                         Err(e) => {
                             tracing::warn!("Failed to check repo hooks: {}", e);
-                            let fallback = self.resolve_global_profile_hooks();
+                            let fallback = self.resolve_global_profile_hooks_for(&data.profile);
                             return self.create_session_with_hooks(data, fallback);
                         }
                     }
@@ -309,6 +311,48 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.profile_picker_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.profile_picker_dialog = None;
+                }
+                DialogResult::Submit(action) => match action {
+                    ProfilePickerAction::Switch(name) => {
+                        self.profile_picker_dialog = None;
+                        return Some(Action::SwitchProfile(name));
+                    }
+                    ProfilePickerAction::Created(name) => {
+                        self.profile_picker_dialog = None;
+                        match crate::session::create_profile(&name) {
+                            Ok(()) => return Some(Action::SwitchProfile(name)),
+                            Err(e) => {
+                                self.info_dialog = Some(InfoDialog::new(
+                                    "Error",
+                                    &format!("Failed to create profile: {}", e),
+                                ));
+                            }
+                        }
+                    }
+                    ProfilePickerAction::Deleted(name) => {
+                        match crate::session::delete_profile(&name) {
+                            Ok(()) => {
+                                self.show_profile_picker();
+                            }
+                            Err(e) => {
+                                self.profile_picker_dialog = None;
+                                self.info_dialog = Some(InfoDialog::new(
+                                    "Error",
+                                    &format!("Failed to delete profile: {}", e),
+                                ));
+                            }
+                        }
+                    }
+                },
+            }
+            return None;
+        }
+
         // Search mode
         if self.search_active {
             match key.code {
@@ -347,9 +391,7 @@ impl HomeView {
                 self.show_help = true;
             }
             KeyCode::Char('P') => {
-                if let Some(next) = self.get_next_profile() {
-                    return Some(Action::SwitchProfile(next));
-                }
+                self.show_profile_picker();
             }
             KeyCode::Char('t') => {
                 self.view_mode = match self.view_mode {
@@ -361,7 +403,7 @@ impl HomeView {
                 // Toggle container/host terminal mode (only in Terminal view for sandboxed sessions)
                 if self.view_mode == ViewMode::Terminal {
                     if let Some(id) = &self.selected_session {
-                        if let Some(inst) = self.instance_map.get(id) {
+                        if let Some(inst) = self.get_instance(id) {
                             if inst.is_sandboxed() {
                                 let id = id.clone();
                                 self.toggle_terminal_mode(&id);
@@ -394,13 +436,16 @@ impl HomeView {
                         .iter()
                         .map(|g| g.path.clone())
                         .collect();
+                    let current_profile = self.storage.profile().to_string();
+                    let profiles =
+                        list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
                     let mut dialog = NewSessionDialog::new(
                         self.available_tools.clone(),
                         existing_titles,
                         existing_groups,
-                        self.storage.profile(),
+                        &current_profile,
+                        profiles,
                     );
-                    // Pre-fill from selected session context
                     if let Some(id) = &self.selected_session {
                         if let Some(inst) = self.instance_map.get(id) {
                             dialog = dialog.with_session_context(
@@ -429,7 +474,7 @@ impl HomeView {
                 let project_path = self
                     .selected_session
                     .as_ref()
-                    .and_then(|id| self.instance_map.get(id))
+                    .and_then(|id| self.get_instance(id))
                     .map(|inst| inst.project_path.clone());
                 match SettingsView::new(self.storage.profile(), project_path) {
                     Ok(view) => self.settings_view = Some(view),
@@ -452,7 +497,7 @@ impl HomeView {
                     return None;
                 };
 
-                let Some(inst) = self.instance_map.get(session_id) else {
+                let Some(inst) = self.get_instance(session_id) else {
                     self.info_dialog =
                         Some(InfoDialog::new("Error", "Could not find session data."));
                     return None;
@@ -472,7 +517,7 @@ impl HomeView {
             }
             KeyCode::Char('x') => {
                 if let Some(session_id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(session_id) {
+                    if let Some(inst) = self.get_instance(session_id) {
                         if inst.status == Status::Stopped || inst.status == Status::Deleting {
                             return None;
                         }
@@ -493,7 +538,7 @@ impl HomeView {
                     return None;
                 }
                 if let Some(session_id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(session_id) {
+                    if let Some(inst) = self.get_instance(session_id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
@@ -543,9 +588,36 @@ impl HomeView {
                     }
                 }
             }
+            KeyCode::Char('a') => {
+                if let Some(id) = &self.selected_session {
+                    let id = id.clone();
+                    self.mutate_instance(&id, |inst| inst.user_active = !inst.user_active);
+                    if let Err(e) = self.save() {
+                        tracing::error!("Failed to save user-active toggle: {}", e);
+                    }
+                    if self.filter_user_active {
+                        self.flat_items =
+                            flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+                        self.filter_flat_items_if_active();
+                        self.cursor = self.cursor.min(self.flat_items.len().saturating_sub(1));
+                        self.update_selected();
+                    }
+                }
+            }
+            KeyCode::Char('A') => {
+                self.filter_user_active = !self.filter_user_active;
+                self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+                self.filter_flat_items_if_active();
+                self.cursor = 0;
+                self.update_selected();
+                if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
+                    config.app_state.filter_user_active = self.filter_user_active;
+                    let _ = save_config(&config);
+                }
+            }
             KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
@@ -567,6 +639,12 @@ impl HomeView {
                         ));
                     }
                 }
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.apply_sort_order(self.sort_order.cycle_reverse());
+            }
+            KeyCode::Char('o') => {
+                self.apply_sort_order(self.sort_order.cycle());
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_cursor(-1);
@@ -592,7 +670,7 @@ impl HomeView {
             }
             KeyCode::Enter => {
                 if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
@@ -600,7 +678,7 @@ impl HomeView {
                     return match self.view_mode {
                         ViewMode::Agent => Some(Action::AttachSession(id.clone())),
                         ViewMode::Terminal => {
-                            let terminal_mode = if let Some(inst) = self.instance_map.get(id) {
+                            let terminal_mode = if let Some(inst) = self.get_instance(id) {
                                 if inst.is_sandboxed() {
                                     self.get_terminal_mode(id)
                                 } else {
@@ -645,36 +723,6 @@ impl HomeView {
                     }
                 }
             }
-            KeyCode::Char('a') => {
-                if self.selected_session.is_some() {
-                    if let Err(e) = self.toggle_user_active() {
-                        tracing::error!("Failed to toggle user-active: {}", e);
-                    }
-                }
-            }
-            KeyCode::Char('A') => {
-                // Shift+A: Toggle filter by user_active
-                self.filter_user_active = !self.filter_user_active;
-                self.update_user_active_filter();
-            }
-            KeyCode::Char('S') => {
-                // Shift+S: Toggle sort mode (default <-> recently active)
-                use super::SortMode;
-                self.sort_mode = match self.sort_mode {
-                    SortMode::Default => SortMode::RecentlyActive,
-                    SortMode::RecentlyActive => SortMode::Default,
-                };
-                self.rebuild_flat_items();
-                self.cursor = 0;
-                self.update_selected();
-            }
-            KeyCode::Char('o') => {
-                // Toggle show/hide groups (flat list vs grouped)
-                self.show_groups = !self.show_groups;
-                self.rebuild_flat_items();
-                self.cursor = 0;
-                self.update_selected();
-            }
             _ => {}
         }
 
@@ -711,13 +759,29 @@ impl HomeView {
         }
     }
 
+    fn apply_sort_order(&mut self, new_order: SortOrder) {
+        self.sort_order = new_order;
+        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        self.filter_flat_items_if_active();
+        if self.search_active && !self.search_query.value().is_empty() {
+            self.update_search();
+        } else {
+            self.cursor = self.cursor.min(self.flat_items.len().saturating_sub(1));
+            self.update_selected();
+        }
+        if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
+            config.app_state.sort_order = Some(self.sort_order);
+            if let Err(e) = save_config(&config) {
+                tracing::warn!("Failed to save sort order: {}", e);
+            }
+        }
+    }
+
     fn toggle_group_collapsed(&mut self, path: &str) {
         self.group_tree.toggle_collapsed(path);
-        self.rebuild_flat_items();
-        if let Err(e) = self
-            .storage
-            .save_with_groups(&self.instances, &self.group_tree)
-        {
+        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        self.filter_flat_items_if_active();
+        if let Err(e) = self.save() {
             tracing::error!("Failed to save group state: {}", e);
         }
     }
@@ -749,7 +813,7 @@ impl HomeView {
         for (idx, item) in self.flat_items.iter().enumerate() {
             let haystack = match item {
                 Item::Session { id, .. } => {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         format!("{} {}", inst.title, inst.project_path)
                     } else {
                         continue;
@@ -803,7 +867,7 @@ impl HomeView {
         for (idx, item) in self.flat_items.iter().enumerate() {
             let haystack = match item {
                 Item::Session { id, .. } => {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         format!("{} {}", inst.title, inst.project_path)
                     } else {
                         continue;
@@ -826,23 +890,6 @@ impl HomeView {
         if let Some(&best) = self.search_matches.first() {
             self.cursor = best;
             self.update_selected();
-        }
-    }
-
-    /// Update filter to show only user_active sessions and their parent groups.
-    /// Rebuilds flat_items to include only matching items.
-    pub(super) fn update_user_active_filter(&mut self) {
-        // Always rebuild from scratch first, then apply filter if active
-        self.rebuild_flat_items();
-        self.cursor = 0;
-        self.update_selected();
-        self.save_filter_user_active();
-    }
-
-    fn save_filter_user_active(&self) {
-        if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
-            config.app_state.filter_user_active = self.filter_user_active;
-            let _ = save_config(&config);
         }
     }
 
@@ -898,11 +945,12 @@ impl HomeView {
         None
     }
 
-    /// Resolve hooks from global+profile config. Returns `Some(hooks)` only if
-    /// at least one hook command is defined. Global/profile hooks are implicitly
-    /// trusted and skip the repo trust dialog.
-    fn resolve_global_profile_hooks(&self) -> Option<crate::session::HooksConfig> {
-        let config = resolve_config(self.storage.profile()).ok()?;
+    /// Resolve hooks from global+profile config for the given profile.
+    fn resolve_global_profile_hooks_for(
+        &self,
+        profile: &str,
+    ) -> Option<crate::session::HooksConfig> {
+        let config = resolve_config(profile).ok()?;
         if config.hooks.on_create.is_empty() && config.hooks.on_launch.is_empty() {
             None
         } else {
@@ -910,16 +958,13 @@ impl HomeView {
         }
     }
 
-    /// Merge trusted repo hooks onto the resolved global+profile config using
-    /// per-field override semantics: repo fields replace global/profile fields
-    /// only when the repo field is non-empty.
-    fn merge_repo_hooks_onto_config(
+    /// Merge trusted repo hooks onto the resolved config for the given profile.
+    fn merge_repo_hooks_onto_config_for(
         &self,
+        profile: &str,
         repo_hooks: crate::session::HooksConfig,
     ) -> Option<crate::session::HooksConfig> {
-        let mut base = resolve_config(self.storage.profile())
-            .map(|c| c.hooks)
-            .unwrap_or_default();
+        let mut base = resolve_config(profile).map(|c| c.hooks).unwrap_or_default();
 
         if !repo_hooks.on_create.is_empty() {
             base.on_create = repo_hooks.on_create;

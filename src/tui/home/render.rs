@@ -5,8 +5,8 @@ use ratatui::widgets::*;
 use std::time::Instant;
 
 use super::{
-    get_indent, HomeView, SortMode, TerminalMode, ViewMode, ICON_COLLAPSED, ICON_DELETING,
-    ICON_ERROR, ICON_EXPANDED, ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_STOPPED,
+    get_indent, HomeView, TerminalMode, ViewMode, ICON_COLLAPSED, ICON_DELETING, ICON_ERROR,
+    ICON_EXPANDED, ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_STOPPED, ICON_UNKNOWN,
     ICON_USER_ACTIVE, ICON_WAITING,
 };
 use crate::session::{Item, Status};
@@ -74,7 +74,7 @@ impl HomeView {
 
         // Render dialogs on top
         if self.show_help {
-            HelpOverlay::render(frame, area, theme);
+            HelpOverlay::render(frame, area, theme, self.sort_order);
         }
 
         if let Some(dialog) = &self.new_dialog {
@@ -110,6 +110,10 @@ impl HomeView {
         }
 
         if let Some(dialog) = &self.info_dialog {
+            dialog.render(frame, area, theme);
+        }
+
+        if let Some(dialog) = &self.profile_picker_dialog {
             dialog.render(frame, area, theme);
         }
     }
@@ -224,7 +228,7 @@ impl HomeView {
             Item::Group {
                 name,
                 collapsed,
-                waiting_count,
+                session_count,
                 ..
             } => {
                 let icon = if *collapsed {
@@ -232,24 +236,19 @@ impl HomeView {
                 } else {
                     ICON_EXPANDED
                 };
-                // Show waiting count (sessions needing attention) instead of total
-                let text = if *waiting_count > 0 {
-                    Cow::Owned(format!("{} ({})", name, waiting_count))
-                } else {
-                    Cow::Borrowed(name.as_str())
-                };
-                // Use same style as sessions for better visual hierarchy
-                let style = Style::default().fg(theme.text);
+                let text = Cow::Owned(format!("{} ({})", name, session_count));
+                let style = Style::default().fg(theme.group).bold();
                 (icon, text, style)
             }
             Item::Session { id, .. } => {
-                if let Some(inst) = self.instance_map.get(id) {
+                if let Some(inst) = self.get_instance(id) {
                     match self.view_mode {
                         ViewMode::Agent => {
                             let icon = match inst.status {
                                 Status::Running => ICON_RUNNING,
                                 Status::Waiting => ICON_WAITING,
                                 Status::Idle => ICON_IDLE,
+                                Status::Unknown => ICON_UNKNOWN,
                                 Status::Stopped => ICON_STOPPED,
                                 Status::Error => ICON_ERROR,
                                 Status::Starting => ICON_STARTING,
@@ -259,6 +258,7 @@ impl HomeView {
                                 Status::Running => theme.running,
                                 Status::Waiting => theme.waiting,
                                 Status::Idle => theme.idle,
+                                Status::Unknown => theme.waiting,
                                 Status::Stopped => theme.dimmed,
                                 Status::Error => theme.error,
                                 Status::Starting => theme.dimmed,
@@ -303,7 +303,7 @@ impl HomeView {
             }
         };
 
-        let mut line_spans = Vec::with_capacity(6);
+        let mut line_spans = Vec::with_capacity(5);
         line_spans.push(Span::raw(indent));
         let icon_style = if is_match {
             Style::default().fg(theme.search)
@@ -311,39 +311,19 @@ impl HomeView {
             style
         };
         line_spans.push(Span::styled(format!("{} ", icon), icon_style));
-
-        // User-active indicator column (fixed width for alignment)
-        if let Item::Session { id, .. } = item {
-            if let Some(inst) = self.instance_map.get(id) {
-                if inst.user_active {
-                    // Brighter version of the status color for the star
-                    let bright_style = match style.fg {
-                        Some(Color::Rgb(r, g, b)) => {
-                            // Brighten by moving towards white
-                            let brighten = |c: u8| c.saturating_add((255 - c) / 2);
-                            Style::default().fg(Color::Rgb(brighten(r), brighten(g), brighten(b)))
-                        }
-                        _ => style,
-                    };
-                    line_spans.push(Span::styled(format!("{} ", ICON_USER_ACTIVE), bright_style));
-                } else {
-                    line_spans.push(Span::raw("  ")); // Same width as "★ "
-                }
-            } else {
-                line_spans.push(Span::raw("  "));
-            }
-        } else {
-            // Groups don't have user_active, but need spacing for alignment
-            line_spans.push(Span::raw("  "));
-        }
-
         line_spans.push(Span::styled(
             text.into_owned(),
             if is_selected { style.bold() } else { style },
         ));
 
         if let Item::Session { id, .. } = item {
-            if let Some(inst) = self.instance_map.get(id) {
+            if let Some(inst) = self.get_instance(id) {
+                if inst.user_active {
+                    line_spans.push(Span::styled(
+                        format!(" {}", ICON_USER_ACTIVE),
+                        Style::default().fg(theme.user_active),
+                    ));
+                }
                 if let Some(wt_info) = &inst.worktree_info {
                     line_spans.push(Span::styled(
                         format!("  {}", wt_info.branch),
@@ -396,7 +376,7 @@ impl HomeView {
 
         if needs_refresh {
             if let Some(id) = &self.selected_session {
-                if let Some(inst) = self.instance_map.get(id) {
+                if let Some(inst) = self.get_instance(id) {
                     self.preview_cache.content = inst
                         .capture_output_with_size(height as usize, width, height)
                         .unwrap_or_default();
@@ -428,7 +408,7 @@ impl HomeView {
 
         if needs_refresh {
             if let Some(id) = &self.selected_session {
-                if let Some(inst) = self.instance_map.get(id) {
+                if let Some(inst) = self.get_instance(id) {
                     self.terminal_preview_cache.content = inst
                         .terminal_tmux_session()
                         .and_then(|s| s.capture_pane(height as usize))
@@ -461,7 +441,7 @@ impl HomeView {
 
         if needs_refresh {
             if let Some(id) = &self.selected_session {
-                if let Some(inst) = self.instance_map.get(id) {
+                if let Some(inst) = self.get_instance(id) {
                     self.container_terminal_preview_cache.content = inst
                         .container_terminal_tmux_session()
                         .and_then(|s| s.capture_pane(height as usize))
@@ -498,7 +478,7 @@ impl HomeView {
                 self.refresh_preview_cache_if_needed(inner.width, inner.height);
 
                 if let Some(id) = &self.selected_session {
-                    if let Some(inst) = self.instance_map.get(id) {
+                    if let Some(inst) = self.get_instance(id) {
                         Preview::render_with_cache(
                             frame,
                             inner,
@@ -520,7 +500,7 @@ impl HomeView {
 
                 if let Some(id) = selected_id {
                     // Determine which terminal to preview based on mode
-                    let terminal_mode = if let Some(inst) = self.instance_map.get(&id) {
+                    let terminal_mode = if let Some(inst) = self.get_instance(&id) {
                         if inst.is_sandboxed() {
                             self.get_terminal_mode(&id)
                         } else {
@@ -547,7 +527,7 @@ impl HomeView {
                     }
 
                     // Now borrow instance for rendering
-                    if let Some(inst) = self.instance_map.get(&id) {
+                    if let Some(inst) = self.get_instance(&id) {
                         let (terminal_running, preview_content) = match terminal_mode {
                             TerminalMode::Container => {
                                 let running = inst
@@ -626,7 +606,7 @@ impl HomeView {
         // Show c: container/host hint for sandboxed sessions in Terminal view
         if self.view_mode == ViewMode::Terminal {
             if let Some(id) = &self.selected_session {
-                if let Some(inst) = self.instance_map.get(id) {
+                if let Some(inst) = self.get_instance(id) {
                     if inst.is_sandboxed() {
                         spans.extend([
                             Span::styled("│", sep_style),
@@ -652,56 +632,11 @@ impl HomeView {
             ]);
         }
 
-        if self.selected_session.is_some() {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" a", key_style),
-                Span::styled(" Active ", desc_style),
-            ]);
-        }
-
-        // Show filter indicator or filter toggle hint
         if self.filter_user_active {
             spans.extend([
                 Span::styled("│", sep_style),
-                Span::styled(" A", key_style),
-                Span::styled(" [★ ON] ", Style::default().fg(theme.accent)),
-            ]);
-        } else {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" A", key_style),
-                Span::styled(" Filter★ ", desc_style),
-            ]);
-        }
-
-        // Show sort mode indicator
-        if self.sort_mode == SortMode::RecentlyActive {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" S", key_style),
-                Span::styled(" [Recent] ", Style::default().fg(theme.accent)),
-            ]);
-        } else {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" S", key_style),
-                Span::styled(" Sort ", desc_style),
-            ]);
-        }
-
-        // Show groups toggle indicator
-        if !self.show_groups {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" o", key_style),
-                Span::styled(" [Flat] ", Style::default().fg(theme.accent)),
-            ]);
-        } else {
-            spans.extend([
-                Span::styled("│", sep_style),
-                Span::styled(" o", key_style),
-                Span::styled(" Groups ", desc_style),
+                Span::styled(" ★", Style::default().fg(theme.user_active)),
+                Span::styled(" Active ", desc_style),
             ]);
         }
 

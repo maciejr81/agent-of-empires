@@ -3,13 +3,19 @@
 use ratatui::style::Color;
 use tracing::warn;
 
-pub const AVAILABLE_THEMES: &[&str] = &["phosphor", "tokyo-night-storm", "catppuccin-latte"];
+pub const AVAILABLE_THEMES: &[&str] = &[
+    "phosphor",
+    "tokyo-night-storm",
+    "catppuccin-latte",
+    "dracula",
+];
 
 pub fn load_theme(name: &str) -> Theme {
     match name {
         "phosphor" => Theme::phosphor(),
         "tokyo-night-storm" => Theme::tokyo_night_storm(),
         "catppuccin-latte" => Theme::catppuccin_latte(),
+        "dracula" => Theme::dracula(),
         _ => {
             warn!("Unknown theme '{}', falling back to phosphor", name);
             Theme::phosphor()
@@ -182,6 +188,47 @@ impl Theme {
             worktree_manual: Color::Rgb(223, 142, 29),
         }
     }
+
+    /// Dracula theme
+    /// Official palette: https://draculatheme.com/spec
+    pub fn dracula() -> Self {
+        Self {
+            background: Color::Rgb(40, 42, 54),
+            border: Color::Rgb(68, 71, 90),
+            terminal_border: Color::Rgb(139, 233, 253),
+            selection: Color::Rgb(68, 71, 90),
+            session_selection: Color::Rgb(98, 114, 164),
+
+            title: Color::Rgb(189, 147, 249),
+            text: Color::Rgb(248, 248, 242),
+            dimmed: Color::Rgb(98, 114, 164),
+            hint: Color::Rgb(98, 114, 164),
+
+            running: Color::Rgb(80, 250, 123),
+            waiting: Color::Rgb(255, 184, 108),
+            idle: Color::Rgb(98, 114, 164),
+            error: Color::Rgb(255, 85, 85),
+            terminal_active: Color::Rgb(139, 233, 253),
+
+            group: Color::Rgb(139, 233, 253),
+            search: Color::Rgb(241, 250, 140),
+            accent: Color::Rgb(255, 121, 198),
+
+            diff_add: Color::Rgb(80, 250, 123),
+            diff_delete: Color::Rgb(255, 85, 85),
+            diff_modified: Color::Rgb(255, 184, 108),
+            diff_context: Color::Rgb(98, 114, 164),
+            diff_header: Color::Rgb(189, 147, 249),
+
+            help_key: Color::Rgb(255, 121, 198),
+
+            branch: Color::Rgb(139, 233, 253),
+            sandbox: Color::Rgb(189, 147, 249),
+            worktree_managed: Color::Rgb(80, 250, 123),
+            worktree_manual: Color::Rgb(255, 184, 108),
+            user_active: Color::Rgb(241, 250, 140), // Yellow for Dracula
+        }
+    }
 }
 
 #[cfg(test)]
@@ -217,10 +264,18 @@ mod tests {
     }
 
     #[test]
+    fn test_load_dracula() {
+        let theme = load_theme("dracula");
+        assert_eq!(theme.title, Color::Rgb(189, 147, 249));
+        assert_eq!(theme.background, Color::Rgb(40, 42, 54));
+    }
+
+    #[test]
     fn test_available_themes_count() {
-        assert_eq!(AVAILABLE_THEMES.len(), 3);
+        assert_eq!(AVAILABLE_THEMES.len(), 4);
         assert!(AVAILABLE_THEMES.contains(&"phosphor"));
         assert!(AVAILABLE_THEMES.contains(&"tokyo-night-storm"));
         assert!(AVAILABLE_THEMES.contains(&"catppuccin-latte"));
+        assert!(AVAILABLE_THEMES.contains(&"dracula"));
     }
 }

@@ -48,6 +48,18 @@ jobs:
           components: clippy
       - run: cargo clippy -- -D warnings
 
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check CLI docs are up-to-date
+        run: |
+          cargo xtask gen-docs
+          git diff --exit-code docs/cli/reference.md \
+            || (echo "::error::CLI docs are out of date. Run 'cargo xtask gen-docs' and commit." && exit 1)
+
   nix:
     name: Nix Eval
     runs-on: ubuntu-latest

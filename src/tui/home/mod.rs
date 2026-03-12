@@ -13,7 +13,7 @@ use std::time::Instant;
 use tui_input::Input;
 
 use crate::session::{
-    config::{load_config, save_config},
+    config::{load_config, save_config, SortOrder},
     flatten_tree, resolve_config, DefaultTerminalMode, Group, GroupTree, Instance, Item, Storage,
 };
 use crate::tmux::AvailableTools;
@@ -22,7 +22,8 @@ use super::creation_poller::{CreationPoller, CreationRequest};
 use super::deletion_poller::DeletionPoller;
 use super::dialogs::{
     ChangelogDialog, ConfirmDialog, GroupDeleteOptionsDialog, HookTrustDialog, InfoDialog,
-    NewSessionData, NewSessionDialog, RenameDialog, UnifiedDeleteDialog, WelcomeDialog,
+    NewSessionData, NewSessionDialog, ProfilePickerDialog, RenameDialog, UnifiedDeleteDialog,
+    WelcomeDialog,
 };
 use super::diff::DiffView;
 use super::settings::SettingsView;
@@ -34,16 +35,6 @@ pub enum ViewMode {
     #[default]
     Agent,
     Terminal,
-}
-
-/// Sort mode for session list
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SortMode {
-    /// Default sorting (alphabetical within groups)
-    #[default]
-    Default,
-    /// Sort by recently accessed (most recent first)
-    RecentlyActive,
 }
 
 /// Terminal mode for sandboxed sessions (container vs host)
@@ -95,6 +86,7 @@ pub(super) const ICON_WAITING: &str = "◐";
 pub(super) const ICON_IDLE: &str = "○";
 pub(super) const ICON_ERROR: &str = "✕";
 pub(super) const ICON_STARTING: &str = "◌";
+pub(super) const ICON_UNKNOWN: &str = "?";
 pub(super) const ICON_STOPPED: &str = "■";
 pub(super) const ICON_DELETING: &str = "✗";
 pub(super) const ICON_COLLAPSED: &str = "▶";
@@ -114,6 +106,8 @@ pub struct HomeView {
     pub(super) selected_session: Option<String>,
     pub(super) selected_group: Option<String>,
     pub(super) view_mode: ViewMode,
+    pub(super) sort_order: SortOrder,
+    pub(super) filter_user_active: bool,
 
     // Dialogs
     pub(super) show_help: bool,
@@ -128,6 +122,7 @@ pub struct HomeView {
     pub(super) welcome_dialog: Option<WelcomeDialog>,
     pub(super) changelog_dialog: Option<ChangelogDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
+    pub(super) profile_picker_dialog: Option<ProfilePickerDialog>,
     /// Session to attach after the custom instruction warning dialog is dismissed
     pub(super) pending_attach_after_warning: Option<String>,
     /// Session to stop after the confirmation dialog is accepted
@@ -138,13 +133,6 @@ pub struct HomeView {
     pub(super) search_query: Input,
     pub(super) search_matches: Vec<usize>,
     pub(super) search_match_index: usize,
-
-    // Filter by user_active
-    pub(super) filter_user_active: bool,
-
-    // Sort and display options
-    pub(super) sort_mode: SortMode,
-    pub(super) show_groups: bool,
 
     // Tool availability
     pub(super) available_tools: AvailableTools,
@@ -197,9 +185,8 @@ impl HomeView {
             .map(|i| (i.id.clone(), i.clone()))
             .collect();
         let group_tree = GroupTree::new_with_groups(&instances, &groups);
-        let flat_items = flatten_tree(&group_tree, &instances);
 
-        // Load the resolved config to get the default terminal mode and sound config
+        // Load the resolved config to get the default terminal mode, sound config, and sort order
         let resolved = resolve_config(storage.profile());
         let default_terminal_mode = resolved
             .as_ref()
@@ -212,6 +199,21 @@ impl HomeView {
             .as_ref()
             .map(|config| config.sound.clone())
             .unwrap_or_default();
+        let user_config = load_config().ok().flatten();
+        let sort_order = user_config
+            .as_ref()
+            .and_then(|c| c.app_state.sort_order)
+            .unwrap_or_default();
+
+        let filter_user_active = user_config
+            .as_ref()
+            .map(|c| c.app_state.filter_user_active)
+            .unwrap_or(false);
+
+        let mut flat_items = flatten_tree(&group_tree, &instances, sort_order);
+        if filter_user_active {
+            Self::apply_user_active_filter(&mut flat_items, &instances);
+        }
 
         let mut view = Self {
             storage,
@@ -224,6 +226,8 @@ impl HomeView {
             selected_session: None,
             selected_group: None,
             view_mode: ViewMode::default(),
+            sort_order,
+            filter_user_active,
             show_help: false,
             new_dialog: None,
             confirm_dialog: None,
@@ -235,19 +239,13 @@ impl HomeView {
             welcome_dialog: None,
             changelog_dialog: None,
             info_dialog: None,
+            profile_picker_dialog: None,
             pending_attach_after_warning: None,
             pending_stop_session: None,
             search_active: false,
             search_query: Input::default(),
             search_matches: Vec::new(),
             search_match_index: 0,
-            filter_user_active: load_config()
-                .ok()
-                .flatten()
-                .map(|c| c.app_state.filter_user_active)
-                .unwrap_or(false),
-            sort_mode: SortMode::default(),
-            show_groups: true,
             available_tools,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
@@ -264,9 +262,7 @@ impl HomeView {
             settings_view: None,
             settings_close_confirm: false,
             diff_view: None,
-            list_width: load_config()
-                .ok()
-                .flatten()
+            list_width: user_config
                 .and_then(|c| c.app_state.home_list_width)
                 .unwrap_or(35),
         };
@@ -276,9 +272,6 @@ impl HomeView {
     }
 
     pub fn reload(&mut self) -> anyhow::Result<()> {
-        // Remember currently selected session to restore after reload
-        let previously_selected = self.selected_session.clone();
-
         let (mut instances, groups) = self.storage.load_with_groups()?;
 
         for inst in &mut instances {
@@ -298,14 +291,13 @@ impl HomeView {
             .collect();
         self.groups = groups;
         self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
-        self.rebuild_flat_items();
+        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
+        if self.filter_user_active {
+            Self::apply_user_active_filter(&mut self.flat_items, &self.instances);
+        }
 
-        // Try to restore selection to previously selected session
-        if let Some(session_id) = previously_selected {
-            self.select_session_by_id(&session_id);
-        } else if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
+        if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
             self.cursor = self.flat_items.len() - 1;
-            self.update_selected();
         }
 
         if self.search_active && !self.search_query.value().is_empty() {
@@ -317,119 +309,6 @@ impl HomeView {
 
         self.update_selected();
         Ok(())
-    }
-
-    /// Rebuild flat_items based on current sort_mode and show_groups settings
-    pub(super) fn rebuild_flat_items(&mut self) {
-        if self.show_groups {
-            // With groups - use standard flatten_tree, then sort within groups if needed
-            self.flat_items = flatten_tree(&self.group_tree, &self.instances);
-
-            if self.sort_mode == SortMode::RecentlyActive {
-                // Sort sessions within each group by last_accessed_at (most recent first)
-                // Groups stay in their original positions, but sessions under them are reordered
-                self.sort_sessions_by_recent();
-            }
-        } else {
-            // Without groups - flat list of all sessions
-            self.flat_items = self
-                .instances
-                .iter()
-                .map(|inst| Item::Session {
-                    id: inst.id.clone(),
-                    depth: 0,
-                })
-                .collect();
-
-            if self.sort_mode == SortMode::RecentlyActive {
-                // Sort all sessions by last_accessed_at (most recent first)
-                self.flat_items.sort_by(|a, b| {
-                    let a_time = if let Item::Session { id, .. } = a {
-                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
-                    } else {
-                        None
-                    };
-                    let b_time = if let Item::Session { id, .. } = b {
-                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
-                    } else {
-                        None
-                    };
-                    // Most recent first (reverse order)
-                    b_time.cmp(&a_time)
-                });
-            }
-        }
-
-        // Apply user_active filter: retain only active sessions and their parent groups
-        if self.filter_user_active {
-            let active_ids: std::collections::HashSet<&str> = self
-                .instances
-                .iter()
-                .filter(|i| i.user_active)
-                .map(|i| i.id.as_str())
-                .collect();
-
-            let active_group_paths: std::collections::HashSet<String> = self
-                .instances
-                .iter()
-                .filter(|i| i.user_active && !i.group_path.is_empty())
-                .flat_map(|i| {
-                    let parts: Vec<&str> = i.group_path.split('/').collect();
-                    (1..=parts.len())
-                        .map(|n| parts[..n].join("/"))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-
-            self.flat_items.retain(|item| match item {
-                Item::Session { id, .. } => active_ids.contains(id.as_str()),
-                Item::Group { path, .. } => active_group_paths.contains(path),
-            });
-        }
-    }
-
-    /// Sort sessions within groups by last_accessed_at while keeping group structure
-    fn sort_sessions_by_recent(&mut self) {
-        // Find contiguous ranges of sessions (between groups) and sort them
-        let mut i = 0;
-        while i < self.flat_items.len() {
-            // Find start of session range (skip groups)
-            while i < self.flat_items.len() && matches!(self.flat_items[i], Item::Group { .. }) {
-                i += 1;
-            }
-
-            if i >= self.flat_items.len() {
-                break;
-            }
-
-            // Find end of session range
-            let start = i;
-            let current_depth = self.flat_items[i].depth();
-            while i < self.flat_items.len() {
-                match &self.flat_items[i] {
-                    Item::Session { depth, .. } if *depth == current_depth => i += 1,
-                    _ => break,
-                }
-            }
-
-            // Sort this range of sessions
-            if i > start + 1 {
-                let range = &mut self.flat_items[start..i];
-                range.sort_by(|a, b| {
-                    let a_time = if let Item::Session { id, .. } = a {
-                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
-                    } else {
-                        None
-                    };
-                    let b_time = if let Item::Session { id, .. } = b {
-                        self.instance_map.get(id).and_then(|i| i.last_accessed_at)
-                    } else {
-                        None
-                    };
-                    b_time.cmp(&a_time)
-                });
-            }
-        }
     }
 
     /// Request a status refresh in the background (non-blocking).
@@ -449,30 +328,26 @@ impl HomeView {
 
         if let Some(updates) = self.status_poller.try_recv_updates() {
             for update in updates {
-                if let Some(inst) = self.instances.iter_mut().find(|i| i.id == update.id) {
-                    if inst.status != Status::Deleting
-                        && inst.status != Status::Stopped
+                let old_status = self.get_instance(&update.id).map(|i| i.status);
+
+                let should_update = old_status.is_some_and(|s| {
+                    s != Status::Deleting
+                        && s != Status::Stopped
                         && update.status != Status::Stopped
-                    {
-                        let old_status = inst.status;
-                        inst.status = update.status;
-                        inst.last_error = update.last_error.clone();
-                        if old_status != update.status {
-                            crate::sound::play_for_transition(
-                                old_status,
-                                update.status,
-                                &self.sound_config,
-                            );
+                });
+
+                if should_update {
+                    let new_status = update.status;
+                    let new_error = update.last_error;
+                    self.mutate_instance(&update.id, |inst| {
+                        inst.status = new_status;
+                        inst.last_error = new_error;
+                    });
+
+                    if let Some(old) = old_status {
+                        if old != new_status {
+                            crate::sound::play_for_transition(old, new_status, &self.sound_config);
                         }
-                    }
-                }
-                if let Some(inst) = self.instance_map.get_mut(&update.id) {
-                    if inst.status != Status::Deleting
-                        && inst.status != Status::Stopped
-                        && update.status != Status::Stopped
-                    {
-                        inst.status = update.status;
-                        inst.last_error = update.last_error;
                     }
                 }
             }
@@ -491,26 +366,16 @@ impl HomeView {
                 self.instance_map.remove(&result.session_id);
                 self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
 
-                if let Err(e) = self
-                    .storage
-                    .save_with_groups(&self.instances, &self.group_tree)
-                {
+                if let Err(e) = self.save() {
                     tracing::error!("Failed to save after deletion: {}", e);
                 }
                 let _ = self.reload();
             } else {
-                if let Some(inst) = self
-                    .instances
-                    .iter_mut()
-                    .find(|i| i.id == result.session_id)
-                {
+                let error = result.error;
+                self.mutate_instance(&result.session_id, |inst| {
                     inst.status = Status::Error;
-                    inst.last_error = result.error.clone();
-                }
-                if let Some(inst) = self.instance_map.get_mut(&result.session_id) {
-                    inst.status = Status::Error;
-                    inst.last_error = result.error;
-                }
+                    inst.last_error = error;
+                });
             }
             return true;
         }
@@ -583,17 +448,49 @@ impl HomeView {
                 ..
             } => {
                 let instance = *instance;
-                self.instances.push(instance.clone());
-                self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
-                if !instance.group_path.is_empty() {
-                    self.group_tree.create_group(&instance.group_path);
-                }
 
-                if let Err(e) = self
-                    .storage
-                    .save_with_groups(&self.instances, &self.group_tree)
-                {
-                    tracing::error!("Failed to save after creation: {}", e);
+                // Check if this was created for a different profile
+                let target_profile = self
+                    .creation_poller
+                    .last_profile()
+                    .unwrap_or_else(|| self.storage.profile().to_string());
+                let is_cross_profile = target_profile != self.storage.profile();
+
+                if is_cross_profile {
+                    // Save to target profile's storage
+                    match Storage::new(&target_profile) {
+                        Ok(target_storage) => match target_storage.load_with_groups() {
+                            Ok((mut target_instances, target_groups)) => {
+                                target_instances.push(instance.clone());
+                                let mut target_tree =
+                                    GroupTree::new_with_groups(&target_instances, &target_groups);
+                                if !instance.group_path.is_empty() {
+                                    target_tree.create_group(&instance.group_path);
+                                }
+                                if let Err(e) =
+                                    target_storage.save_with_groups(&target_instances, &target_tree)
+                                {
+                                    tracing::error!("Failed to save to target profile: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to load target profile data: {}", e);
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!("Failed to open target profile storage: {}", e);
+                        }
+                    }
+                } else {
+                    self.instances.push(instance.clone());
+                    self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+                    if !instance.group_path.is_empty() {
+                        self.group_tree.create_group(&instance.group_path);
+                    }
+
+                    if let Err(e) = self.save() {
+                        tracing::error!("Failed to save after creation: {}", e);
+                    }
                 }
 
                 if on_launch_hooks_ran {
@@ -625,17 +522,26 @@ impl HomeView {
         self.creation_poller.is_pending()
     }
 
-    /// Tick the dialog spinner animation if loading, and drain hook progress
-    pub fn tick_dialog(&mut self) {
+    /// Tick dialog animations/timers and drain hook progress.
+    /// Returns true when a redraw is needed.
+    pub fn tick_dialog(&mut self) -> bool {
+        let mut changed = false;
+
         if let Some(dialog) = &mut self.new_dialog {
+            if dialog.tick() {
+                changed = true;
+            }
+
             if dialog.is_loading() {
-                dialog.tick();
                 // Drain all pending hook progress messages
                 while let Some(progress) = self.creation_poller.try_recv_progress() {
                     dialog.push_hook_progress(progress);
+                    changed = true;
                 }
             }
         }
+
+        changed
     }
 
     pub fn has_dialog(&self) -> bool {
@@ -649,6 +555,7 @@ impl HomeView {
             || self.welcome_dialog.is_some()
             || self.changelog_dialog.is_some()
             || self.info_dialog.is_some()
+            || self.profile_picker_dialog.is_some()
             || self.settings_view.is_some()
             || self.diff_view.is_some()
     }
@@ -686,26 +593,32 @@ impl HomeView {
         self.available_tools.clone()
     }
 
-    pub(super) fn get_next_profile(&self) -> Option<String> {
+    /// Show the profile picker dialog with fresh data from disk.
+    pub(super) fn show_profile_picker(&mut self) {
         use crate::session::list_profiles;
+        use crate::tui::dialogs::{ProfileEntry, ProfilePickerDialog};
 
-        let profiles = list_profiles().ok()?;
-        if profiles.len() <= 1 {
-            return None;
-        }
-        let current = self.storage.profile();
-        let current_idx = profiles.iter().position(|p| p == current).unwrap_or(0);
-        let next_idx = (current_idx + 1) % profiles.len();
-        Some(profiles[next_idx].clone())
+        let current_profile = self.storage.profile().to_string();
+        let profiles = list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
+        let entries: Vec<ProfileEntry> = profiles
+            .iter()
+            .map(|name| {
+                let session_count = Storage::new(name)
+                    .and_then(|s| s.load())
+                    .map(|instances| instances.len())
+                    .unwrap_or(0);
+                ProfileEntry {
+                    name: name.clone(),
+                    session_count,
+                    is_active: name == &current_profile,
+                }
+            })
+            .collect();
+        self.profile_picker_dialog = Some(ProfilePickerDialog::new(entries, &current_profile));
     }
 
     pub fn set_instance_status(&mut self, id: &str, status: crate::session::Status) {
-        if let Some(inst) = self.instance_map.get_mut(id) {
-            inst.status = status;
-        }
-        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
-            inst.status = status;
-        }
+        self.mutate_instance(id, |inst| inst.status = status);
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -714,34 +627,35 @@ impl HomeView {
         Ok(())
     }
 
-    pub fn set_instance_error(&mut self, id: &str, error: Option<String>) {
-        if let Some(inst) = self.instance_map.get_mut(id) {
-            inst.last_error = error.clone();
-        }
+    /// Centralized instance mutation: applies `f` once to the `instances` vec
+    /// entry, then clones the result into `instance_map`. This guarantees both
+    /// collections stay in sync even for non-idempotent closures.
+    pub(super) fn mutate_instance(&mut self, id: &str, f: impl FnOnce(&mut Instance)) {
         if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
-            inst.last_error = error;
+            f(inst);
+            self.instance_map.insert(id.to_string(), inst.clone());
         }
     }
 
-    /// Update last_accessed_at timestamp for a session (called when attaching)
-    pub fn update_last_accessed(&mut self, id: &str) {
-        use chrono::Utc;
-        let now = Some(Utc::now());
-
-        if let Some(inst) = self.instance_map.get_mut(id) {
-            inst.last_accessed_at = now;
-        }
+    /// Like `mutate_instance`, but for fallible operations. Clones the entry,
+    /// applies `f` to the clone, and writes back to both collections only on
+    /// success -- neither collection is modified on error.
+    pub(super) fn try_mutate_instance(
+        &mut self,
+        id: &str,
+        f: impl FnOnce(&mut Instance) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
         if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
-            inst.last_accessed_at = now;
+            let mut updated = inst.clone();
+            f(&mut updated)?;
+            *inst = updated.clone();
+            self.instance_map.insert(id.to_string(), updated);
         }
+        Ok(())
+    }
 
-        // Save to persist the timestamp
-        if let Err(e) = self
-            .storage
-            .save_with_groups(&self.instances, &self.group_tree)
-        {
-            tracing::error!("Failed to save last_accessed_at: {}", e);
-        }
+    pub fn set_instance_error(&mut self, id: &str, error: Option<String>) {
+        self.mutate_instance(id, |inst| inst.last_error = error);
     }
 
     pub fn start_terminal_for_instance_with_size(
@@ -749,34 +663,49 @@ impl HomeView {
         id: &str,
         size: Option<(u16, u16)>,
     ) -> anyhow::Result<()> {
-        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
-            inst.start_terminal_with_size(size)?;
-        }
-        if let Some(inst) = self.instance_map.get_mut(id) {
-            inst.start_terminal_with_size(size)?;
-        }
-        self.storage
-            .save_with_groups(&self.instances, &self.group_tree)?;
+        self.try_mutate_instance(id, |inst| inst.start_terminal_with_size(size))?;
+        self.save()?;
         Ok(())
     }
 
+    fn apply_user_active_filter(flat_items: &mut Vec<Item>, instances: &[Instance]) {
+        let active_ids: std::collections::HashSet<&str> = instances
+            .iter()
+            .filter(|i| i.user_active)
+            .map(|i| i.id.as_str())
+            .collect();
+        let active_group_paths: std::collections::HashSet<String> = instances
+            .iter()
+            .filter(|i| i.user_active && !i.group_path.is_empty())
+            .flat_map(|i| {
+                let parts: Vec<&str> = i.group_path.split('/').collect();
+                (1..=parts.len())
+                    .map(|n| parts[..n].join("/"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        flat_items.retain(|item| match item {
+            Item::Session { id, .. } => active_ids.contains(id.as_str()),
+            Item::Group { path, .. } => active_group_paths.contains(path),
+        });
+    }
+
+    pub(super) fn filter_flat_items_if_active(&mut self) {
+        if self.filter_user_active {
+            Self::apply_user_active_filter(&mut self.flat_items, &self.instances);
+        }
+    }
+
     pub fn select_session_by_id(&mut self, session_id: &str) {
-        // First, find the flat_items index for this session
-        let flat_idx = self.flat_items.iter().enumerate().find_map(|(idx, item)| {
+        for (idx, item) in self.flat_items.iter().enumerate() {
             if let Item::Session { id, .. } = item {
                 if id == session_id {
-                    return Some(idx);
+                    self.cursor = idx;
+                    self.update_selected();
+                    return;
                 }
             }
-            None
-        });
-
-        let Some(flat_idx) = flat_idx else {
-            return;
-        };
-
-        self.cursor = flat_idx;
-        self.update_selected();
+        }
     }
 
     /// Get the terminal mode for a session (uses config default if not set)
@@ -817,13 +746,6 @@ impl HomeView {
         id: &str,
         size: Option<(u16, u16)>,
     ) -> anyhow::Result<()> {
-        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
-            inst.start_container_terminal_with_size(size)?;
-        }
-        if let Some(inst) = self.instance_map.get_mut(id) {
-            inst.start_container_terminal_with_size(size)?;
-        }
-        // Don't save terminal info for container terminals - it's ephemeral
-        Ok(())
+        self.try_mutate_instance(id, |inst| inst.start_container_terminal_with_size(size))
     }
 }

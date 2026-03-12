@@ -17,6 +17,8 @@ pub use config::{
     ContainerRuntimeName, DefaultTerminalMode, SandboxConfig, SessionConfig, ThemeConfig,
     TmuxMouseMode, TmuxStatusBarMode, UpdatesConfig, WorktreeConfig,
 };
+pub(crate) use environment::user_shell;
+pub use environment::validate_env_entry;
 pub use groups::{flatten_tree, Group, GroupTree, Item};
 pub use instance::{Instance, SandboxInfo, Status, TerminalInfo, WorktreeInfo};
 pub use profile_config::{
@@ -126,6 +128,37 @@ pub fn delete_profile(name: &str) -> Result<()> {
     }
 
     fs::remove_dir_all(&profile_dir)?;
+    Ok(())
+}
+
+pub fn rename_profile(old_name: &str, new_name: &str) -> Result<()> {
+    if new_name.is_empty() {
+        anyhow::bail!("New profile name cannot be empty");
+    }
+    if new_name.contains('/') || new_name.contains('\\') {
+        anyhow::bail!("Profile name cannot contain path separators");
+    }
+
+    let base = get_app_dir()?;
+    let old_dir = base.join("profiles").join(old_name);
+    let new_dir = base.join("profiles").join(new_name);
+
+    if !old_dir.exists() {
+        anyhow::bail!("Profile '{}' does not exist", old_name);
+    }
+    if new_dir.exists() {
+        anyhow::bail!("Profile '{}' already exists", new_name);
+    }
+
+    fs::rename(&old_dir, &new_dir)?;
+
+    // Update default profile if the renamed profile was the default
+    if let Some(config) = load_config()? {
+        if config.default_profile == old_name {
+            set_default_profile(new_name)?;
+        }
+    }
+
     Ok(())
 }
 

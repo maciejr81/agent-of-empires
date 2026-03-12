@@ -32,6 +32,7 @@ pub enum Status {
     Waiting,
     #[default]
     Idle,
+    Unknown,
     Stopped,
     Error,
     Starting,
@@ -57,12 +58,10 @@ pub struct SandboxInfo {
     pub container_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
-    /// Additional environment variable keys to pass from host (session-specific)
+    /// Additional environment entries (session-specific).
+    /// `KEY` = pass through from host, `KEY=VALUE` = set explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_env_keys: Option<Vec<String>>,
-    /// Additional KEY=VALUE environment variables (session-specific overrides)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_env_values: Option<std::collections::HashMap<String, String>>,
+    pub extra_env: Option<Vec<String>>,
     /// Custom instruction text to inject into agent launch command
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_instruction: Option<String>,
@@ -79,6 +78,8 @@ pub struct Instance {
     pub parent_session_id: Option<String>,
     #[serde(default)]
     pub command: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub extra_args: String,
     #[serde(default)]
     pub tool: String,
     #[serde(default)]
@@ -125,6 +126,7 @@ impl Instance {
             group_path: String::new(),
             parent_session_id: None,
             command: String::new(),
+            extra_args: String::new(),
             tool: "claude".to_string(),
             yolo_mode: false,
             status: Status::Idle,
@@ -150,6 +152,22 @@ impl Instance {
 
     pub fn is_yolo_mode(&self) -> bool {
         self.yolo_mode
+    }
+
+    fn has_custom_command(&self) -> bool {
+        if !self.extra_args.is_empty() {
+            return true;
+        }
+        if self.command.is_empty() {
+            return false;
+        }
+        crate::agents::get_agent(&self.tool)
+            .map(|a| self.command != a.binary)
+            .unwrap_or(true)
+    }
+
+    pub fn expects_shell(&self) -> bool {
+        crate::tmux::utils::is_shell_command(self.get_tool_command())
     }
 
     pub fn get_tool_command(&self) -> &str {
@@ -238,9 +256,9 @@ impl Instance {
         // Get workspace path inside container (handles bare repo worktrees correctly)
         let container_workdir = self.container_workdir();
 
-        let cmd = format!(
-            "{} /bin/bash",
-            container.exec_command(Some(&format!("-w {} {}", container_workdir, env_part)))
+        let cmd = container.exec_command(
+            Some(&format!("-w {} {}", container_workdir, env_part)),
+            "/bin/bash",
         );
 
         let session = self.container_terminal_tmux_session()?;
@@ -317,9 +335,7 @@ impl Instance {
             None
         } else {
             // Start with global+profile hooks as the base
-            let profile = super::config::Config::load()
-                .map(|c| c.default_profile)
-                .unwrap_or_else(|_| "default".to_string());
+            let profile = super::config::resolve_default_profile();
             let mut resolved_on_launch = super::profile_config::resolve_config(&profile)
                 .map(|c| c.hooks.on_launch)
                 .unwrap_or_default();
@@ -341,6 +357,22 @@ impl Instance {
             }
         };
 
+        // Install status-detection hooks for agents that support them
+        let agent = crate::agents::get_agent(&self.tool);
+        if let Some(hook_cfg) = agent.and_then(|a| a.hook_config.as_ref()) {
+            if self.is_sandboxed() {
+                // For sandboxed sessions, hooks are installed via build_container_config
+            } else {
+                // Install hooks in the user's home directory settings
+                if let Some(home) = dirs::home_dir() {
+                    let settings_path = home.join(hook_cfg.settings_rel_path);
+                    if let Err(e) = crate::hooks::install_hooks(&settings_path) {
+                        tracing::warn!("Failed to install agent hooks: {}", e);
+                    }
+                }
+            }
+        }
+
         let cmd = if self.is_sandboxed() {
             let container = self.get_container_for_instance()?;
             // Run on_launch hooks inside the container
@@ -358,20 +390,25 @@ impl Instance {
             }
 
             let sandbox = self.sandbox_info.as_ref().unwrap();
-            let agent = crate::agents::get_agent(&self.tool);
+            let base_cmd = if self.extra_args.is_empty() {
+                self.get_tool_command().to_string()
+            } else {
+                format!("{} {}", self.get_tool_command(), self.extra_args)
+            };
             let mut tool_cmd = if self.is_yolo_mode() {
                 if let Some(ref yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                     match yolo {
                         crate::agents::YoloMode::CliFlag(flag) => {
-                            format!("{} {}", self.get_tool_command(), flag)
+                            format!("{} {}", base_cmd, flag)
                         }
-                        crate::agents::YoloMode::EnvVar(..) => self.get_tool_command().to_string(),
+                        crate::agents::YoloMode::EnvVar(..)
+                        | crate::agents::YoloMode::AlwaysYolo => base_cmd,
                     }
                 } else {
-                    self.get_tool_command().to_string()
+                    base_cmd
                 }
             } else {
-                self.get_tool_command().to_string()
+                base_cmd
             };
             if let Some(ref instruction) = sandbox.custom_instruction {
                 if !instruction.is_empty() {
@@ -383,17 +420,13 @@ impl Instance {
                 }
             }
 
-            let env_args = build_docker_env_args(sandbox);
-            let env_part = if env_args.is_empty() {
-                String::new()
-            } else {
-                format!("{} ", env_args)
-            };
-            Some(wrap_command_ignore_suspend(&format!(
-                "{} {}",
-                container.exec_command(Some(&env_part)),
-                tool_cmd
-            )))
+            let mut env_args = build_docker_env_args(sandbox);
+            // Pass AOE_INSTANCE_ID into the container
+            env_args = format!("{} -e AOE_INSTANCE_ID={}", env_args, self.id);
+            let env_part = format!("{} ", env_args);
+            Some(wrap_command_ignore_suspend(
+                &container.exec_command(Some(&env_part), &tool_cmd),
+            ))
         } else {
             // Run on_launch hooks on host for non-sandboxed sessions
             if let Some(ref hook_cmds) = on_launch_hooks {
@@ -404,11 +437,21 @@ impl Instance {
                 }
             }
 
+            // Prepend AOE_INSTANCE_ID env var if this agent supports hooks
+            let env_prefix = if agent.and_then(|a| a.hook_config.as_ref()).is_some() {
+                format!("AOE_INSTANCE_ID={} ", self.id)
+            } else {
+                String::new()
+            };
+
             if self.command.is_empty() {
                 crate::agents::get_agent(&self.tool)
                     .filter(|a| a.supports_host_launch)
                     .map(|a| {
                         let mut cmd = a.binary.to_string();
+                        if !self.extra_args.is_empty() {
+                            cmd = format!("{} {}", cmd, self.extra_args);
+                        }
                         if self.is_yolo_mode() {
                             if let Some(ref yolo) = a.yolo {
                                 match yolo {
@@ -418,15 +461,18 @@ impl Instance {
                                     crate::agents::YoloMode::EnvVar(key, value) => {
                                         cmd = format!("{}={} {}", key, value, cmd);
                                     }
+                                    crate::agents::YoloMode::AlwaysYolo => {}
                                 }
                             }
                         }
-                        wrap_command_ignore_suspend(&cmd)
+                        wrap_command_ignore_suspend(&format!("{}{}", env_prefix, cmd))
                     })
             } else {
                 let mut cmd = self.command.clone();
+                if !self.extra_args.is_empty() {
+                    cmd = format!("{} {}", cmd, self.extra_args);
+                }
                 if self.is_yolo_mode() {
-                    let agent = crate::agents::get_agent(&self.tool);
                     if let Some(ref yolo) = agent.and_then(|a| a.yolo.as_ref()) {
                         match yolo {
                             crate::agents::YoloMode::CliFlag(flag) => {
@@ -435,10 +481,14 @@ impl Instance {
                             crate::agents::YoloMode::EnvVar(key, value) => {
                                 cmd = format!("{}={} {}", key, value, cmd);
                             }
+                            crate::agents::YoloMode::AlwaysYolo => {}
                         }
                     }
                 }
-                Some(wrap_command_ignore_suspend(&cmd))
+                Some(wrap_command_ignore_suspend(&format!(
+                    "{}{}",
+                    env_prefix, cmd
+                )))
             }
         };
 
@@ -502,7 +552,7 @@ impl Instance {
     /// Get the container working directory for this instance.
     pub fn container_workdir(&self) -> String {
         container_config::compute_volume_paths(Path::new(&self.project_path), &self.project_path)
-            .map(|(_, _, wd)| wd)
+            .map(|(_, wd)| wd)
             .unwrap_or_else(|_| "/workspace".to_string())
     }
 
@@ -512,6 +562,7 @@ impl Instance {
             self.sandbox_info.as_ref().unwrap(),
             &self.tool,
             self.is_yolo_mode(),
+            &self.id,
         )
     }
 
@@ -552,6 +603,9 @@ impl Instance {
                 container.stop()?;
             }
         }
+
+        crate::hooks::cleanup_hook_status_dir(&self.id);
+
         Ok(())
     }
 
@@ -592,10 +646,42 @@ impl Instance {
             return;
         }
 
-        // Detect status from pane content
-        self.status = match session.detect_status(&self.tool) {
+        // Check hook-based status first (more reliable than tmux pane parsing)
+        if let Some(hook_status) = crate::hooks::read_hook_status(&self.id) {
+            tracing::trace!("hook status detection '{}': {:?}", self.title, hook_status);
+            let crashed_to_shell = !self.expects_shell() && session.is_pane_running_shell();
+            self.status = if session.is_pane_dead() || crashed_to_shell {
+                Status::Error
+            } else {
+                hook_status
+            };
+            self.last_error = None;
+            return;
+        }
+
+        // Fall back to tmux pane content detection
+        let detected = match session.detect_status(&self.tool) {
             Ok(status) => status,
             Err(_) => Status::Idle,
+        };
+        tracing::trace!(
+            "status detection '{}' (tool={}, custom_cmd={}): {:?}",
+            self.title,
+            self.tool,
+            self.has_custom_command(),
+            detected
+        );
+        let is_shell_stale = || !self.expects_shell() && session.is_pane_running_shell();
+        self.status = match detected {
+            Status::Idle if self.has_custom_command() => {
+                if session.is_pane_dead() || is_shell_stale() {
+                    Status::Error
+                } else {
+                    Status::Unknown
+                }
+            }
+            Status::Idle if session.is_pane_dead() || is_shell_stale() => Status::Error,
+            other => other,
         };
 
         // Clear stale error now that the session is healthy
@@ -625,8 +711,13 @@ fn generate_id() -> String {
 /// the actual command.
 ///
 /// Uses POSIX-standard `stty susp undef` which works on both Linux and macOS.
+/// Single quotes in `cmd` are escaped with the `'\''` technique to prevent
+/// breaking out of the outer single-quoted wrapper.
 fn wrap_command_ignore_suspend(cmd: &str) -> String {
-    format!("bash -c 'stty susp undef; exec {}'", cmd)
+    let shell = super::environment::user_posix_shell();
+    let escaped = cmd.replace('\'', "'\\''");
+    // Use login shell (-l) so version-manager PATHs (NVM, etc.) are available.
+    format!("{} -lc 'stty susp undef; exec env {}'", shell, escaped)
 }
 
 #[cfg(test)]
@@ -700,8 +791,7 @@ mod tests {
             image: "test-image".to_string(),
             container_name: "test".to_string(),
             created_at: None,
-            extra_env_keys: None,
-            extra_env_values: None,
+            extra_env: None,
             custom_instruction: None,
         });
         assert!(!inst.is_sandboxed());
@@ -716,8 +806,7 @@ mod tests {
             image: "test-image".to_string(),
             container_name: "test".to_string(),
             created_at: None,
-            extra_env_keys: None,
-            extra_env_values: None,
+            extra_env: None,
             custom_instruction: None,
         });
         assert!(inst.is_sandboxed());
@@ -780,6 +869,7 @@ mod tests {
             Status::Running,
             Status::Waiting,
             Status::Idle,
+            Status::Unknown,
             Status::Stopped,
             Status::Error,
             Status::Starting,
@@ -830,8 +920,7 @@ mod tests {
             image: "myimage:latest".to_string(),
             container_name: "test_container".to_string(),
             created_at: Some(Utc::now()),
-            extra_env_keys: Some(vec!["MY_VAR".to_string(), "OTHER_VAR".to_string()]),
-            extra_env_values: None,
+            extra_env: Some(vec!["MY_VAR".to_string(), "OTHER_VAR".to_string()]),
             custom_instruction: None,
         };
 
@@ -842,7 +931,7 @@ mod tests {
         assert_eq!(info.container_id, deserialized.container_id);
         assert_eq!(info.image, deserialized.image);
         assert_eq!(info.container_name, deserialized.container_name);
-        assert_eq!(info.extra_env_keys, deserialized.extra_env_keys);
+        assert_eq!(info.extra_env, deserialized.extra_env);
     }
 
     #[test]
@@ -959,5 +1048,61 @@ mod tests {
             created_at: None,
         });
         assert!(!inst.has_terminal());
+    }
+
+    #[test]
+    fn test_has_custom_command_empty() {
+        let inst = Instance::new("test", "/tmp/test");
+        assert!(!inst.has_custom_command());
+    }
+
+    #[test]
+    fn test_has_custom_command_same_as_agent_binary() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.command = "claude".to_string();
+        assert!(!inst.has_custom_command());
+    }
+
+    #[test]
+    fn test_has_custom_command_override() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "claude".to_string();
+        inst.command = "my-wrapper".to_string();
+        assert!(inst.has_custom_command());
+    }
+
+    #[test]
+    fn test_has_custom_command_unknown_tool() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        inst.tool = "unknown_agent".to_string();
+        inst.command = "some-binary".to_string();
+        assert!(inst.has_custom_command());
+    }
+
+    #[test]
+    fn test_expects_shell() {
+        let mut inst = Instance::new("test", "/tmp/test");
+        assert!(!inst.expects_shell());
+
+        inst.tool = "unknown-tool".to_string();
+        inst.command = String::new();
+        assert!(inst.expects_shell());
+
+        inst.tool = "claude".to_string();
+        inst.command = "bash".to_string();
+        assert!(inst.expects_shell());
+
+        inst.command = "my-agent".to_string();
+        assert!(!inst.expects_shell());
+    }
+
+    #[test]
+    fn test_status_unknown_serialization() {
+        let status = Status::Unknown;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"unknown\"");
+        let deserialized: Status = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, Status::Unknown);
     }
 }

@@ -210,9 +210,8 @@ impl App {
                 refresh_needed = true;
             }
 
-            // Tick the dialog spinner if loading
-            if self.home.is_creation_pending() {
-                self.home.tick_dialog();
+            // Tick dialog animations/timers (spinner, transient flashes)
+            if self.home.tick_dialog() {
                 refresh_needed = true;
             }
 
@@ -231,6 +230,10 @@ impl App {
             if self.should_quit {
                 break;
             }
+        }
+
+        if let Err(e) = self.home.save() {
+            tracing::error!("Failed to save on quit: {}", e);
         }
 
         Ok(())
@@ -382,12 +385,15 @@ impl App {
             None => return Ok(()),
         };
 
-        // Update last_accessed_at timestamp
-        self.home.update_last_accessed(session_id);
-
         let tmux_session = instance.tmux_session()?;
 
-        if !tmux_session.exists() {
+        if !tmux_session.exists()
+            || tmux_session.is_pane_dead()
+            || (!instance.expects_shell() && tmux_session.is_pane_running_shell())
+        {
+            if tmux_session.exists() {
+                let _ = tmux_session.kill();
+            }
             // Show warning (once) if custom instruction is configured for an unsupported agent
             if instance.is_sandboxed() {
                 let has_instruction = instance
@@ -468,9 +474,6 @@ impl App {
             None => return Ok(()),
         };
 
-        // Update last_accessed_at timestamp
-        self.home.update_last_accessed(session_id);
-
         // Get terminal size to pass to tmux session creation
         let size = crate::terminal::get_size();
 
@@ -478,7 +481,10 @@ impl App {
         let attach_fn: Box<dyn FnOnce() -> Result<()>> = match mode {
             TerminalMode::Container if instance.is_sandboxed() => {
                 let container_session = instance.container_terminal_tmux_session()?;
-                if !container_session.exists() {
+                if !container_session.exists() || container_session.is_pane_dead() {
+                    if container_session.exists() {
+                        let _ = container_session.kill();
+                    }
                     if let Err(e) = self
                         .home
                         .start_container_terminal_for_instance_with_size(session_id, size)
@@ -492,7 +498,10 @@ impl App {
             }
             _ => {
                 let terminal_session = instance.terminal_tmux_session()?;
-                if !terminal_session.exists() {
+                if !terminal_session.exists() || terminal_session.is_pane_dead() {
+                    if terminal_session.exists() {
+                        let _ = terminal_session.kill();
+                    }
                     if let Err(e) = self
                         .home
                         .start_terminal_for_instance_with_size(session_id, size)

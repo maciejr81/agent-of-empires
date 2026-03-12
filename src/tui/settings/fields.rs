@@ -1,7 +1,5 @@
 //! Setting field definitions and config mapping
 
-use std::collections::HashMap;
-
 use crate::session::{
     validate_check_interval, Config, ContainerRuntimeName, DefaultTerminalMode, ProfileConfig,
     TmuxMouseMode, TmuxStatusBarMode,
@@ -58,12 +56,12 @@ pub enum FieldKey {
     YoloModeDefault,
     DefaultImage,
     Environment,
-    EnvironmentValues,
     SandboxAutoCleanup,
     CpuLimit,
     MemoryLimit,
     DefaultTerminalMode,
     ExtraVolumes,
+    PortMappings,
     VolumeIgnores,
     MountSsh,
     CustomInstruction,
@@ -73,6 +71,8 @@ pub enum FieldKey {
     Mouse,
     // Session
     DefaultTool,
+    AgentExtraArgs,
+    AgentCommandOverride,
     // Sound
     SoundEnabled,
     SoundMode,
@@ -116,25 +116,55 @@ fn resolve_optional<T: Clone>(
     }
 }
 
-/// Helper to set or clear a profile override based on whether value matches global.
-fn set_or_clear_override<T, S, F>(
-    new_value: T,
-    global_value: &T,
-    section: &mut Option<S>,
-    set_field: F,
-) where
-    T: Clone + PartialEq,
+/// Convert a FieldValue to a human-readable display string.
+fn value_display_string(value: &FieldValue) -> String {
+    match value {
+        FieldValue::Bool(v) => if *v { "on" } else { "off" }.to_string(),
+        FieldValue::Text(v) => {
+            if v.is_empty() {
+                "(empty)".to_string()
+            } else {
+                v.clone()
+            }
+        }
+        FieldValue::Number(v) => v.to_string(),
+        FieldValue::Select { selected, options } => {
+            options.get(*selected).cloned().unwrap_or_default()
+        }
+        FieldValue::List(items) => format!("[{} items]", items.len()),
+        FieldValue::OptionalText(v) => v.clone().unwrap_or_else(|| "(empty)".to_string()),
+    }
+}
+
+/// Build the inherited display string when a field has an override.
+fn inherited_if(has_override: bool, global_value: FieldValue) -> Option<String> {
+    if has_override {
+        Some(value_display_string(&global_value))
+    } else {
+        None
+    }
+}
+
+/// Helper to set a profile override. Always stores the value; use 'r' key to clear overrides.
+fn set_profile_override<T, S, F>(new_value: T, section: &mut Option<S>, set_field: F)
+where
+    T: Clone,
     S: Default,
     F: FnOnce(&mut S, Option<T>),
 {
-    if new_value == *global_value {
-        if let Some(ref mut s) = section {
-            set_field(s, None);
-        }
-    } else {
-        let s = section.get_or_insert_with(S::default);
-        set_field(s, Some(new_value));
-    }
+    let s = section.get_or_insert_with(S::default);
+    set_field(s, Some(new_value));
+}
+
+/// Parse a list of "key=value" strings into a HashMap.
+fn parse_key_value_list(items: &[String]) -> std::collections::HashMap<String, String> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let (k, v) = item.split_once('=')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 /// Value types for settings fields
@@ -159,8 +189,10 @@ pub struct SettingField {
     pub description: &'static str,
     pub value: FieldValue,
     pub category: SettingsCategory,
-    /// Whether this field has a profile override (only relevant in profile scope)
+    /// Whether this field has a profile/repo override
     pub has_override: bool,
+    /// Human-readable display of the inherited (global/base) value, set when has_override is true
+    pub inherited_display: Option<String>,
 }
 
 impl SettingField {
@@ -231,6 +263,18 @@ fn build_theme_fields(
     let options: Vec<String> = AVAILABLE_THEMES.iter().map(|s| s.to_string()).collect();
     let selected = options.iter().position(|s| s == &name).unwrap_or(0);
 
+    let global_selected = options
+        .iter()
+        .position(|s| s == &global.theme.name)
+        .unwrap_or(0);
+    let inherited = inherited_if(
+        has_override,
+        FieldValue::Select {
+            selected: global_selected,
+            options: options.clone(),
+        },
+    );
+
     vec![SettingField {
         key: FieldKey::ThemeName,
         label: "Theme",
@@ -238,6 +282,7 @@ fn build_theme_fields(
         value: FieldValue::Select { selected, options },
         category: SettingsCategory::Theme,
         has_override,
+        inherited_display: inherited,
     }]
 }
 
@@ -272,6 +317,7 @@ fn build_updates_fields(
             value: FieldValue::Bool(check_enabled),
             category: SettingsCategory::Updates,
             has_override: o1,
+            inherited_display: inherited_if(o1, FieldValue::Bool(global.updates.check_enabled)),
         },
         SettingField {
             key: FieldKey::CheckIntervalHours,
@@ -280,6 +326,10 @@ fn build_updates_fields(
             value: FieldValue::Number(check_interval),
             category: SettingsCategory::Updates,
             has_override: o2,
+            inherited_display: inherited_if(
+                o2,
+                FieldValue::Number(global.updates.check_interval_hours),
+            ),
         },
         SettingField {
             key: FieldKey::NotifyInCli,
@@ -288,6 +338,7 @@ fn build_updates_fields(
             value: FieldValue::Bool(notify_in_cli),
             category: SettingsCategory::Updates,
             has_override: o3,
+            inherited_display: inherited_if(o3, FieldValue::Bool(global.updates.notify_in_cli)),
         },
     ]
 }
@@ -328,6 +379,10 @@ fn build_worktree_fields(
             value: FieldValue::Text(path_template),
             category: SettingsCategory::Worktree,
             has_override: o1,
+            inherited_display: inherited_if(
+                o1,
+                FieldValue::Text(global.worktree.path_template.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::BareRepoPathTemplate,
@@ -336,6 +391,10 @@ fn build_worktree_fields(
             value: FieldValue::Text(bare_repo_template),
             category: SettingsCategory::Worktree,
             has_override: o2,
+            inherited_display: inherited_if(
+                o2,
+                FieldValue::Text(global.worktree.bare_repo_path_template.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::WorktreeAutoCleanup,
@@ -344,6 +403,7 @@ fn build_worktree_fields(
             value: FieldValue::Bool(auto_cleanup),
             category: SettingsCategory::Worktree,
             has_override: o3,
+            inherited_display: inherited_if(o3, FieldValue::Bool(global.worktree.auto_cleanup)),
         },
         SettingField {
             key: FieldKey::DeleteBranchOnCleanup,
@@ -352,6 +412,10 @@ fn build_worktree_fields(
             value: FieldValue::Bool(delete_branch_on_cleanup),
             category: SettingsCategory::Worktree,
             has_override: o4,
+            inherited_display: inherited_if(
+                o4,
+                FieldValue::Bool(global.worktree.delete_branch_on_cleanup),
+            ),
         },
     ]
 }
@@ -378,19 +442,6 @@ fn build_sandbox_fields(
         global.sandbox.environment.clone(),
         sb.and_then(|s| s.environment.clone()),
     );
-    let (environment_values, o_env_vals) = resolve_value(
-        scope,
-        global.sandbox.environment_values.clone(),
-        sb.and_then(|s| s.environment_values.clone()),
-    );
-    let env_values_list = {
-        let mut entries: Vec<String> = environment_values
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect();
-        entries.sort();
-        entries
-    };
     let (auto_cleanup, o5) = resolve_value(
         scope,
         global.sandbox.auto_cleanup,
@@ -417,6 +468,11 @@ fn build_sandbox_fields(
         scope,
         global.sandbox.extra_volumes.clone(),
         sb.and_then(|s| s.extra_volumes.clone()),
+    );
+    let (port_mappings, o_pm) = resolve_value(
+        scope,
+        global.sandbox.port_mappings.clone(),
+        sb.and_then(|s| s.port_mappings.clone()),
     );
     let (volume_ignores, o7) = resolve_value(
         scope,
@@ -450,6 +506,18 @@ fn build_sandbox_fields(
         ContainerRuntimeName::AppleContainer => 1,
     };
 
+    let global_terminal_mode_selected = match global.sandbox.default_terminal_mode {
+        DefaultTerminalMode::Host => 0,
+        DefaultTerminalMode::Container => 1,
+    };
+    let terminal_mode_options = vec!["Host".into(), "Container".into()];
+
+    let global_container_runtime_selected = match global.sandbox.container_runtime {
+        ContainerRuntimeName::Docker => 0,
+        ContainerRuntimeName::AppleContainer => 1,
+    };
+    let container_runtime_options = vec!["Docker".into(), "Apple Container".into()];
+
     vec![
         SettingField {
             key: FieldKey::SandboxEnabledByDefault,
@@ -458,6 +526,10 @@ fn build_sandbox_fields(
             value: FieldValue::Bool(enabled_by_default),
             category: SettingsCategory::Sandbox,
             has_override: o1,
+            inherited_display: inherited_if(
+                o1,
+                FieldValue::Bool(global.sandbox.enabled_by_default),
+            ),
         },
         SettingField {
             key: FieldKey::DefaultImage,
@@ -466,22 +538,22 @@ fn build_sandbox_fields(
             value: FieldValue::Text(default_image),
             category: SettingsCategory::Sandbox,
             has_override: o3,
+            inherited_display: inherited_if(
+                o3,
+                FieldValue::Text(global.sandbox.default_image.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::Environment,
-            label: "Environment Variables",
-            description: "Var names to pass through from host (e.g. GITHUB_TOKEN)",
+            label: "Environment",
+            description: "Env vars: bare KEY passes host value, KEY=VALUE sets explicitly",
             value: FieldValue::List(environment),
             category: SettingsCategory::Sandbox,
             has_override: o4,
-        },
-        SettingField {
-            key: FieldKey::EnvironmentValues,
-            label: "Environment Values",
-            description: "Custom KEY=VALUE env vars for sandbox. Use $VAR to reference host vars",
-            value: FieldValue::List(env_values_list),
-            category: SettingsCategory::Sandbox,
-            has_override: o_env_vals,
+            inherited_display: inherited_if(
+                o4,
+                FieldValue::List(global.sandbox.environment.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::SandboxAutoCleanup,
@@ -490,6 +562,7 @@ fn build_sandbox_fields(
             value: FieldValue::Bool(auto_cleanup),
             category: SettingsCategory::Sandbox,
             has_override: o5,
+            inherited_display: inherited_if(o5, FieldValue::Bool(global.sandbox.auto_cleanup)),
         },
         SettingField {
             key: FieldKey::CpuLimit,
@@ -498,6 +571,10 @@ fn build_sandbox_fields(
             value: FieldValue::OptionalText(cpu_limit),
             category: SettingsCategory::Sandbox,
             has_override: o_cpu,
+            inherited_display: inherited_if(
+                o_cpu,
+                FieldValue::OptionalText(global.sandbox.cpu_limit.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::MemoryLimit,
@@ -506,6 +583,10 @@ fn build_sandbox_fields(
             value: FieldValue::OptionalText(memory_limit),
             category: SettingsCategory::Sandbox,
             has_override: o_mem,
+            inherited_display: inherited_if(
+                o_mem,
+                FieldValue::OptionalText(global.sandbox.memory_limit.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::DefaultTerminalMode,
@@ -513,10 +594,17 @@ fn build_sandbox_fields(
             description: "Default terminal for sandboxed sessions (toggle with 'c' key)",
             value: FieldValue::Select {
                 selected: terminal_mode_selected,
-                options: vec!["Host".into(), "Container".into()],
+                options: terminal_mode_options.clone(),
             },
             category: SettingsCategory::Sandbox,
             has_override: o6,
+            inherited_display: inherited_if(
+                o6,
+                FieldValue::Select {
+                    selected: global_terminal_mode_selected,
+                    options: terminal_mode_options,
+                },
+            ),
         },
         SettingField {
             key: FieldKey::ExtraVolumes,
@@ -525,6 +613,22 @@ fn build_sandbox_fields(
             value: FieldValue::List(extra_volumes),
             category: SettingsCategory::Sandbox,
             has_override: o_ev,
+            inherited_display: inherited_if(
+                o_ev,
+                FieldValue::List(global.sandbox.extra_volumes.clone()),
+            ),
+        },
+        SettingField {
+            key: FieldKey::PortMappings,
+            label: "Port Mappings",
+            description: "Expose container ports to host (e.g. 3000:3000)",
+            value: FieldValue::List(port_mappings),
+            category: SettingsCategory::Sandbox,
+            has_override: o_pm,
+            inherited_display: inherited_if(
+                o_pm,
+                FieldValue::List(global.sandbox.port_mappings.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::VolumeIgnores,
@@ -533,6 +637,10 @@ fn build_sandbox_fields(
             value: FieldValue::List(volume_ignores),
             category: SettingsCategory::Sandbox,
             has_override: o7,
+            inherited_display: inherited_if(
+                o7,
+                FieldValue::List(global.sandbox.volume_ignores.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::MountSsh,
@@ -541,6 +649,7 @@ fn build_sandbox_fields(
             value: FieldValue::Bool(mount_ssh),
             category: SettingsCategory::Sandbox,
             has_override: o8,
+            inherited_display: inherited_if(o8, FieldValue::Bool(global.sandbox.mount_ssh)),
         },
         SettingField {
             key: FieldKey::CustomInstruction,
@@ -549,6 +658,10 @@ fn build_sandbox_fields(
             value: FieldValue::OptionalText(custom_instruction),
             category: SettingsCategory::Sandbox,
             has_override: o_ci,
+            inherited_display: inherited_if(
+                o_ci,
+                FieldValue::OptionalText(global.sandbox.custom_instruction.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::ContainerRuntime,
@@ -556,10 +669,17 @@ fn build_sandbox_fields(
             description: "Container runtime for sandboxing (Docker or Apple Container on macOS)",
             value: FieldValue::Select {
                 selected: container_runtime_selected,
-                options: vec!["Docker".into(), "Apple Container".into()],
+                options: container_runtime_options.clone(),
             },
             category: SettingsCategory::Sandbox,
             has_override: o_cr,
+            inherited_display: inherited_if(
+                o_cr,
+                FieldValue::Select {
+                    selected: global_container_runtime_selected,
+                    options: container_runtime_options,
+                },
+            ),
         },
     ]
 }
@@ -592,6 +712,18 @@ fn build_tmux_fields(
         TmuxMouseMode::Disabled => 2,
     };
 
+    let global_status_bar_selected = match global.tmux.status_bar {
+        TmuxStatusBarMode::Auto => 0,
+        TmuxStatusBarMode::Enabled => 1,
+        TmuxStatusBarMode::Disabled => 2,
+    };
+    let global_mouse_selected = match global.tmux.mouse {
+        TmuxMouseMode::Auto => 0,
+        TmuxMouseMode::Enabled => 1,
+        TmuxMouseMode::Disabled => 2,
+    };
+    let tmux_options = vec!["Auto".into(), "Enabled".into(), "Disabled".into()];
+
     vec![
         SettingField {
             key: FieldKey::StatusBar,
@@ -599,10 +731,17 @@ fn build_tmux_fields(
             description: "Control tmux status bar styling (Auto respects your tmux config)",
             value: FieldValue::Select {
                 selected: status_bar_selected,
-                options: vec!["Auto".into(), "Enabled".into(), "Disabled".into()],
+                options: tmux_options.clone(),
             },
             category: SettingsCategory::Tmux,
             has_override: status_bar_override,
+            inherited_display: inherited_if(
+                status_bar_override,
+                FieldValue::Select {
+                    selected: global_status_bar_selected,
+                    options: tmux_options.clone(),
+                },
+            ),
         },
         SettingField {
             key: FieldKey::Mouse,
@@ -610,10 +749,17 @@ fn build_tmux_fields(
             description: "Control mouse scrolling (Auto respects your tmux config)",
             value: FieldValue::Select {
                 selected: mouse_selected,
-                options: vec!["Auto".into(), "Enabled".into(), "Disabled".into()],
+                options: tmux_options.clone(),
             },
             category: SettingsCategory::Tmux,
             has_override: mouse_override,
+            inherited_display: inherited_if(
+                mouse_override,
+                FieldValue::Select {
+                    selected: global_mouse_selected,
+                    options: tmux_options,
+                },
+            ),
         },
     ]
 }
@@ -643,14 +789,78 @@ fn build_session_fields(
         session.and_then(|s| s.yolo_mode_default),
     );
 
+    // Agent extra args: HashMap -> Vec<String> of "key=value" items for List field
+    let (extra_args_map, extra_args_override) = resolve_value(
+        scope,
+        global.session.agent_extra_args.clone(),
+        session.and_then(|s| s.agent_extra_args.clone()),
+    );
+    let extra_args_list: Vec<String> = {
+        let mut items: Vec<_> = extra_args_map
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        items.sort();
+        items
+    };
+
+    // Agent command override: HashMap -> Vec<String> of "key=value" items
+    let (cmd_override_map, cmd_override_override) = resolve_value(
+        scope,
+        global.session.agent_command_override.clone(),
+        session.and_then(|s| s.agent_command_override.clone()),
+    );
+    let cmd_override_list: Vec<String> = {
+        let mut items: Vec<_> = cmd_override_map
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        items.sort();
+        items
+    };
+
+    let global_tool_selected =
+        crate::agents::settings_index_from_name(global.session.default_tool.as_deref());
+
+    let global_extra_args_list: Vec<String> = {
+        let mut items: Vec<_> = global
+            .session
+            .agent_extra_args
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        items.sort();
+        items
+    };
+    let global_cmd_override_list: Vec<String> = {
+        let mut items: Vec<_> = global
+            .session
+            .agent_command_override
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        items.sort();
+        items
+    };
+
     vec![
         SettingField {
             key: FieldKey::DefaultTool,
             label: "Default Tool",
             description: "Default coding tool for new sessions",
-            value: FieldValue::Select { selected, options },
+            value: FieldValue::Select {
+                selected,
+                options: options.clone(),
+            },
             category: SettingsCategory::Session,
             has_override,
+            inherited_display: inherited_if(
+                has_override,
+                FieldValue::Select {
+                    selected: global_tool_selected,
+                    options,
+                },
+            ),
         },
         SettingField {
             key: FieldKey::YoloModeDefault,
@@ -659,6 +869,34 @@ fn build_session_fields(
             value: FieldValue::Bool(yolo_mode_default),
             category: SettingsCategory::Session,
             has_override: yolo_override,
+            inherited_display: inherited_if(
+                yolo_override,
+                FieldValue::Bool(global.session.yolo_mode_default),
+            ),
+        },
+        SettingField {
+            key: FieldKey::AgentExtraArgs,
+            label: "Agent Extra Args",
+            description: "Per-agent extra arguments (agent=args, e.g. opencode=--port 8080)",
+            value: FieldValue::List(extra_args_list),
+            category: SettingsCategory::Session,
+            has_override: extra_args_override,
+            inherited_display: inherited_if(
+                extra_args_override,
+                FieldValue::List(global_extra_args_list),
+            ),
+        },
+        SettingField {
+            key: FieldKey::AgentCommandOverride,
+            label: "Agent Command Override",
+            description: "Per-agent command override replacing the binary (agent=command)",
+            value: FieldValue::List(cmd_override_list),
+            category: SettingsCategory::Session,
+            has_override: cmd_override_override,
+            inherited_display: inherited_if(
+                cmd_override_override,
+                FieldValue::List(global_cmd_override_list),
+            ),
         },
     ]
 }
@@ -714,6 +952,12 @@ fn build_sound_fields(
         snd.map(|s| s.on_error.is_some()).unwrap_or(false),
     );
 
+    let global_mode_selected = match &global.sound.mode {
+        SoundMode::Random => 0,
+        SoundMode::Specific(_) => 1,
+    };
+    let sound_mode_options = vec!["Random".into(), "Specific".into()];
+
     vec![
         SettingField {
             key: FieldKey::SoundEnabled,
@@ -722,6 +966,7 @@ fn build_sound_fields(
             value: FieldValue::Bool(enabled),
             category: SettingsCategory::Sound,
             has_override: o1,
+            inherited_display: inherited_if(o1, FieldValue::Bool(global.sound.enabled)),
         },
         SettingField {
             key: FieldKey::SoundMode,
@@ -729,10 +974,17 @@ fn build_sound_fields(
             description: "How to select sounds (Random or Specific file name)",
             value: FieldValue::Select {
                 selected: mode_selected,
-                options: vec!["Random".into(), "Specific".into()],
+                options: sound_mode_options.clone(),
             },
             category: SettingsCategory::Sound,
             has_override: o2,
+            inherited_display: inherited_if(
+                o2,
+                FieldValue::Select {
+                    selected: global_mode_selected,
+                    options: sound_mode_options,
+                },
+            ),
         },
         SettingField {
             key: FieldKey::SoundOnStart,
@@ -741,6 +993,10 @@ fn build_sound_fields(
             value: FieldValue::OptionalText(on_start),
             category: SettingsCategory::Sound,
             has_override: o3,
+            inherited_display: inherited_if(
+                o3,
+                FieldValue::OptionalText(global.sound.on_start.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::SoundOnRunning,
@@ -749,6 +1005,10 @@ fn build_sound_fields(
             value: FieldValue::OptionalText(on_running),
             category: SettingsCategory::Sound,
             has_override: o4,
+            inherited_display: inherited_if(
+                o4,
+                FieldValue::OptionalText(global.sound.on_running.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::SoundOnWaiting,
@@ -757,6 +1017,10 @@ fn build_sound_fields(
             value: FieldValue::OptionalText(on_waiting),
             category: SettingsCategory::Sound,
             has_override: o5,
+            inherited_display: inherited_if(
+                o5,
+                FieldValue::OptionalText(global.sound.on_waiting.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::SoundOnIdle,
@@ -765,6 +1029,10 @@ fn build_sound_fields(
             value: FieldValue::OptionalText(on_idle),
             category: SettingsCategory::Sound,
             has_override: o6,
+            inherited_display: inherited_if(
+                o6,
+                FieldValue::OptionalText(global.sound.on_idle.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::SoundOnError,
@@ -773,6 +1041,10 @@ fn build_sound_fields(
             value: FieldValue::OptionalText(on_error),
             category: SettingsCategory::Sound,
             has_override: o7,
+            inherited_display: inherited_if(
+                o7,
+                FieldValue::OptionalText(global.sound.on_error.clone()),
+            ),
         },
     ]
 }
@@ -803,6 +1075,10 @@ fn build_hooks_fields(
             value: FieldValue::List(on_create),
             category: SettingsCategory::Hooks,
             has_override: o1,
+            inherited_display: inherited_if(
+                o1,
+                FieldValue::List(global.hooks.on_create.clone()),
+            ),
         },
         SettingField {
             key: FieldKey::HookOnLaunch,
@@ -811,12 +1087,16 @@ fn build_hooks_fields(
             value: FieldValue::List(on_launch),
             category: SettingsCategory::Hooks,
             has_override: o2,
+            inherited_display: inherited_if(
+                o2,
+                FieldValue::List(global.hooks.on_launch.clone()),
+            ),
         },
     ]
 }
 
 /// Apply a field's value back to the appropriate config.
-/// For profile scope, if the value matches global, the override is removed.
+/// For profile scope, the value is always stored as an override.
 pub fn apply_field_to_config(
     field: &SettingField,
     scope: SettingsScope,
@@ -859,10 +1139,8 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::YoloModeDefault, FieldValue::Bool(v)) => config.session.yolo_mode_default = *v,
         (FieldKey::DefaultImage, FieldValue::Text(v)) => config.sandbox.default_image = v.clone(),
         (FieldKey::Environment, FieldValue::List(v)) => config.sandbox.environment = v.clone(),
-        (FieldKey::EnvironmentValues, FieldValue::List(v)) => {
-            config.sandbox.environment_values = parse_env_values_list(v);
-        }
         (FieldKey::ExtraVolumes, FieldValue::List(v)) => config.sandbox.extra_volumes = v.clone(),
+        (FieldKey::PortMappings, FieldValue::List(v)) => config.sandbox.port_mappings = v.clone(),
         (FieldKey::VolumeIgnores, FieldValue::List(v)) => config.sandbox.volume_ignores = v.clone(),
         (FieldKey::MountSsh, FieldValue::Bool(v)) => config.sandbox.mount_ssh = *v,
         (FieldKey::SandboxAutoCleanup, FieldValue::Bool(v)) => config.sandbox.auto_cleanup = *v,
@@ -907,6 +1185,12 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
             config.session.default_tool =
                 crate::agents::name_from_settings_index(*selected).map(|s| s.to_string());
         }
+        (FieldKey::AgentExtraArgs, FieldValue::List(v)) => {
+            config.session.agent_extra_args = parse_key_value_list(v);
+        }
+        (FieldKey::AgentCommandOverride, FieldValue::List(v)) => {
+            config.session.agent_command_override = parse_key_value_list(v);
+        }
         // Sound
         (FieldKey::SoundEnabled, FieldValue::Bool(v)) => config.sound.enabled = *v,
         (FieldKey::SoundMode, FieldValue::Select { selected, .. }) => {
@@ -938,210 +1222,120 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
 }
 
 /// Apply a field to the profile config.
-/// If the value matches the global config, the override is cleared instead of set.
-fn apply_field_to_profile(field: &SettingField, global: &Config, config: &mut ProfileConfig) {
+/// Always stores the value as an override; use 'r' key to clear overrides.
+fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut ProfileConfig) {
     match (&field.key, &field.value) {
         // Theme
         (FieldKey::ThemeName, FieldValue::Select { selected, options }) => {
             let name = options.get(*selected).cloned().unwrap_or_default();
-            if name == global.theme.name {
-                if let Some(ref mut t) = config.theme {
-                    t.name = None;
-                }
-            } else {
-                use crate::session::ThemeConfigOverride;
-                let t = config
-                    .theme
-                    .get_or_insert_with(ThemeConfigOverride::default);
-                t.name = Some(name);
-            }
+            use crate::session::ThemeConfigOverride;
+            let t = config
+                .theme
+                .get_or_insert_with(ThemeConfigOverride::default);
+            t.name = Some(name);
         }
         // Updates
         (FieldKey::CheckEnabled, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.updates.check_enabled,
-                &mut config.updates,
-                |s, val| s.check_enabled = val,
-            );
+            set_profile_override(*v, &mut config.updates, |s, val| s.check_enabled = val);
         }
         (FieldKey::CheckIntervalHours, FieldValue::Number(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.updates.check_interval_hours,
-                &mut config.updates,
-                |s, val| s.check_interval_hours = val,
-            );
+            set_profile_override(*v, &mut config.updates, |s, val| {
+                s.check_interval_hours = val
+            });
         }
         (FieldKey::NotifyInCli, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.updates.notify_in_cli,
-                &mut config.updates,
-                |s, val| s.notify_in_cli = val,
-            );
+            set_profile_override(*v, &mut config.updates, |s, val| s.notify_in_cli = val);
         }
         // Worktree
         (FieldKey::PathTemplate, FieldValue::Text(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.worktree.path_template,
-                &mut config.worktree,
-                |s, val| s.path_template = val,
-            );
+            set_profile_override(v.clone(), &mut config.worktree, |s, val| {
+                s.path_template = val
+            });
         }
         (FieldKey::BareRepoPathTemplate, FieldValue::Text(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.worktree.bare_repo_path_template,
-                &mut config.worktree,
-                |s, val| s.bare_repo_path_template = val,
-            );
+            set_profile_override(v.clone(), &mut config.worktree, |s, val| {
+                s.bare_repo_path_template = val
+            });
         }
         (FieldKey::WorktreeAutoCleanup, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.worktree.auto_cleanup,
-                &mut config.worktree,
-                |s, val| s.auto_cleanup = val,
-            );
+            set_profile_override(*v, &mut config.worktree, |s, val| s.auto_cleanup = val);
         }
         (FieldKey::DeleteBranchOnCleanup, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.worktree.delete_branch_on_cleanup,
-                &mut config.worktree,
-                |s, val| s.delete_branch_on_cleanup = val,
-            );
+            set_profile_override(*v, &mut config.worktree, |s, val| {
+                s.delete_branch_on_cleanup = val
+            });
         }
         // Sandbox
         (FieldKey::SandboxEnabledByDefault, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.sandbox.enabled_by_default,
-                &mut config.sandbox,
-                |s, val| s.enabled_by_default = val,
-            );
+            set_profile_override(*v, &mut config.sandbox, |s, val| s.enabled_by_default = val);
         }
         (FieldKey::DefaultImage, FieldValue::Text(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.sandbox.default_image,
-                &mut config.sandbox,
-                |s, val| s.default_image = val,
-            );
+            set_profile_override(v.clone(), &mut config.sandbox, |s, val| {
+                s.default_image = val
+            });
         }
         (FieldKey::Environment, FieldValue::List(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.sandbox.environment,
-                &mut config.sandbox,
-                |s, val| s.environment = val,
-            );
-        }
-        (FieldKey::EnvironmentValues, FieldValue::List(v)) => {
-            let map = parse_env_values_list(v);
-            set_or_clear_override(
-                map,
-                &global.sandbox.environment_values,
-                &mut config.sandbox,
-                |s, val| s.environment_values = val,
-            );
+            set_profile_override(v.clone(), &mut config.sandbox, |s, val| s.environment = val);
         }
         (FieldKey::ExtraVolumes, FieldValue::List(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.sandbox.extra_volumes,
-                &mut config.sandbox,
-                |s, val| s.extra_volumes = val,
-            );
+            set_profile_override(v.clone(), &mut config.sandbox, |s, val| {
+                s.extra_volumes = val
+            });
+        }
+        (FieldKey::PortMappings, FieldValue::List(v)) => {
+            set_profile_override(v.clone(), &mut config.sandbox, |s, val| {
+                s.port_mappings = val
+            });
         }
         (FieldKey::VolumeIgnores, FieldValue::List(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.sandbox.volume_ignores,
-                &mut config.sandbox,
-                |s, val| s.volume_ignores = val,
-            );
+            set_profile_override(v.clone(), &mut config.sandbox, |s, val| {
+                s.volume_ignores = val
+            });
         }
         (FieldKey::MountSsh, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.sandbox.mount_ssh,
-                &mut config.sandbox,
-                |s, val| s.mount_ssh = val,
-            );
+            set_profile_override(*v, &mut config.sandbox, |s, val| s.mount_ssh = val);
         }
         (FieldKey::SandboxAutoCleanup, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.sandbox.auto_cleanup,
-                &mut config.sandbox,
-                |s, val| s.auto_cleanup = val,
-            );
+            set_profile_override(*v, &mut config.sandbox, |s, val| s.auto_cleanup = val);
         }
         (FieldKey::CpuLimit, FieldValue::OptionalText(v)) => {
-            if *v == global.sandbox.cpu_limit {
-                if let Some(ref mut s) = config.sandbox {
-                    s.cpu_limit = None;
-                }
-            } else {
-                use crate::session::SandboxConfigOverride;
-                let s = config
-                    .sandbox
-                    .get_or_insert_with(SandboxConfigOverride::default);
-                s.cpu_limit = v.clone();
-            }
+            use crate::session::SandboxConfigOverride;
+            let s = config
+                .sandbox
+                .get_or_insert_with(SandboxConfigOverride::default);
+            s.cpu_limit = v.clone();
         }
         (FieldKey::MemoryLimit, FieldValue::OptionalText(v)) => {
-            if *v == global.sandbox.memory_limit {
-                if let Some(ref mut s) = config.sandbox {
-                    s.memory_limit = None;
-                }
-            } else {
-                use crate::session::SandboxConfigOverride;
-                let s = config
-                    .sandbox
-                    .get_or_insert_with(SandboxConfigOverride::default);
-                s.memory_limit = v.clone();
-            }
+            use crate::session::SandboxConfigOverride;
+            let s = config
+                .sandbox
+                .get_or_insert_with(SandboxConfigOverride::default);
+            s.memory_limit = v.clone();
         }
         (FieldKey::CustomInstruction, FieldValue::OptionalText(v)) => {
-            if *v == global.sandbox.custom_instruction {
-                if let Some(ref mut s) = config.sandbox {
-                    s.custom_instruction = None;
-                }
-            } else {
-                use crate::session::SandboxConfigOverride;
-                let s = config
-                    .sandbox
-                    .get_or_insert_with(SandboxConfigOverride::default);
-                s.custom_instruction = v.clone();
-            }
+            use crate::session::SandboxConfigOverride;
+            let s = config
+                .sandbox
+                .get_or_insert_with(SandboxConfigOverride::default);
+            s.custom_instruction = v.clone();
         }
         (FieldKey::DefaultTerminalMode, FieldValue::Select { selected, .. }) => {
             let mode = match selected {
                 0 => DefaultTerminalMode::Host,
                 _ => DefaultTerminalMode::Container,
             };
-            set_or_clear_override(
-                mode,
-                &global.sandbox.default_terminal_mode,
-                &mut config.sandbox,
-                |s, val| s.default_terminal_mode = val,
-            );
+            set_profile_override(mode, &mut config.sandbox, |s, val| {
+                s.default_terminal_mode = val
+            });
         }
         (FieldKey::ContainerRuntime, FieldValue::Select { selected, .. }) => {
             let runtime = match selected {
                 0 => ContainerRuntimeName::Docker,
                 _ => ContainerRuntimeName::AppleContainer,
             };
-            set_or_clear_override(
-                runtime,
-                &global.sandbox.container_runtime,
-                &mut config.sandbox,
-                |s, val| s.container_runtime = val,
-            );
+            set_profile_override(runtime, &mut config.sandbox, |s, val| {
+                s.container_runtime = val
+            });
         }
         // Tmux
         (FieldKey::StatusBar, FieldValue::Select { selected, .. }) => {
@@ -1150,9 +1344,7 @@ fn apply_field_to_profile(field: &SettingField, global: &Config, config: &mut Pr
                 1 => TmuxStatusBarMode::Enabled,
                 _ => TmuxStatusBarMode::Disabled,
             };
-            set_or_clear_override(mode, &global.tmux.status_bar, &mut config.tmux, |s, val| {
-                s.status_bar = val
-            });
+            set_profile_override(mode, &mut config.tmux, |s, val| s.status_bar = val);
         }
         (FieldKey::Mouse, FieldValue::Select { selected, .. }) => {
             let mode = match selected {
@@ -1160,144 +1352,86 @@ fn apply_field_to_profile(field: &SettingField, global: &Config, config: &mut Pr
                 1 => TmuxMouseMode::Enabled,
                 _ => TmuxMouseMode::Disabled,
             };
-            set_or_clear_override(mode, &global.tmux.mouse, &mut config.tmux, |s, val| {
-                s.mouse = val
-            });
+            set_profile_override(mode, &mut config.tmux, |s, val| s.mouse = val);
         }
         // Session
         (FieldKey::DefaultTool, FieldValue::Select { selected, .. }) => {
             let tool = crate::agents::name_from_settings_index(*selected).map(|s| s.to_string());
-            if tool == global.session.default_tool {
-                if let Some(ref mut session) = config.session {
-                    session.default_tool = None;
-                }
-            } else {
-                use crate::session::SessionConfigOverride;
-                let session = config
-                    .session
-                    .get_or_insert_with(SessionConfigOverride::default);
-                session.default_tool = tool;
-            }
+            use crate::session::SessionConfigOverride;
+            let session = config
+                .session
+                .get_or_insert_with(SessionConfigOverride::default);
+            session.default_tool = tool;
         }
         (FieldKey::YoloModeDefault, FieldValue::Bool(v)) => {
-            set_or_clear_override(
-                *v,
-                &global.session.yolo_mode_default,
-                &mut config.session,
-                |s, val| s.yolo_mode_default = val,
-            );
+            set_profile_override(*v, &mut config.session, |s, val| s.yolo_mode_default = val);
+        }
+        (FieldKey::AgentExtraArgs, FieldValue::List(v)) => {
+            let map = parse_key_value_list(v);
+            use crate::session::SessionConfigOverride;
+            let s = config
+                .session
+                .get_or_insert_with(SessionConfigOverride::default);
+            s.agent_extra_args = Some(map);
+        }
+        (FieldKey::AgentCommandOverride, FieldValue::List(v)) => {
+            let map = parse_key_value_list(v);
+            use crate::session::SessionConfigOverride;
+            let s = config
+                .session
+                .get_or_insert_with(SessionConfigOverride::default);
+            s.agent_command_override = Some(map);
         }
         // Sound
         (FieldKey::SoundEnabled, FieldValue::Bool(v)) => {
-            set_or_clear_override(*v, &global.sound.enabled, &mut config.sound, |s, val| {
-                s.enabled = val
-            });
+            set_profile_override(*v, &mut config.sound, |s, val| s.enabled = val);
         }
         (FieldKey::SoundMode, FieldValue::Select { selected, .. }) => {
             let mode = match selected {
                 1 => SoundMode::Specific(String::new()),
                 _ => SoundMode::Random,
             };
-            set_or_clear_override(mode, &global.sound.mode, &mut config.sound, |s, val| {
-                s.mode = val
-            });
+            set_profile_override(mode, &mut config.sound, |s, val| s.mode = val);
         }
         (FieldKey::SoundOnStart, FieldValue::OptionalText(v)) => {
-            if *v == global.sound.on_start {
-                if let Some(ref mut s) = config.sound {
-                    s.on_start = None;
-                }
-            } else {
-                let s = config
-                    .sound
-                    .get_or_insert_with(crate::sound::SoundConfigOverride::default);
-                s.on_start = v.clone();
-            }
+            let s = config
+                .sound
+                .get_or_insert_with(crate::sound::SoundConfigOverride::default);
+            s.on_start = v.clone();
         }
         (FieldKey::SoundOnRunning, FieldValue::OptionalText(v)) => {
-            if *v == global.sound.on_running {
-                if let Some(ref mut s) = config.sound {
-                    s.on_running = None;
-                }
-            } else {
-                let s = config
-                    .sound
-                    .get_or_insert_with(crate::sound::SoundConfigOverride::default);
-                s.on_running = v.clone();
-            }
+            let s = config
+                .sound
+                .get_or_insert_with(crate::sound::SoundConfigOverride::default);
+            s.on_running = v.clone();
         }
         (FieldKey::SoundOnWaiting, FieldValue::OptionalText(v)) => {
-            if *v == global.sound.on_waiting {
-                if let Some(ref mut s) = config.sound {
-                    s.on_waiting = None;
-                }
-            } else {
-                let s = config
-                    .sound
-                    .get_or_insert_with(crate::sound::SoundConfigOverride::default);
-                s.on_waiting = v.clone();
-            }
+            let s = config
+                .sound
+                .get_or_insert_with(crate::sound::SoundConfigOverride::default);
+            s.on_waiting = v.clone();
         }
         (FieldKey::SoundOnIdle, FieldValue::OptionalText(v)) => {
-            if *v == global.sound.on_idle {
-                if let Some(ref mut s) = config.sound {
-                    s.on_idle = None;
-                }
-            } else {
-                let s = config
-                    .sound
-                    .get_or_insert_with(crate::sound::SoundConfigOverride::default);
-                s.on_idle = v.clone();
-            }
+            let s = config
+                .sound
+                .get_or_insert_with(crate::sound::SoundConfigOverride::default);
+            s.on_idle = v.clone();
         }
         (FieldKey::SoundOnError, FieldValue::OptionalText(v)) => {
-            if *v == global.sound.on_error {
-                if let Some(ref mut s) = config.sound {
-                    s.on_error = None;
-                }
-            } else {
-                let s = config
-                    .sound
-                    .get_or_insert_with(crate::sound::SoundConfigOverride::default);
-                s.on_error = v.clone();
-            }
+            let s = config
+                .sound
+                .get_or_insert_with(crate::sound::SoundConfigOverride::default);
+            s.on_error = v.clone();
         }
         // Hooks
         (FieldKey::HookOnCreate, FieldValue::List(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.hooks.on_create,
-                &mut config.hooks,
-                |s, val| s.on_create = val,
-            );
+            set_profile_override(v.clone(), &mut config.hooks, |s, val| s.on_create = val);
         }
         (FieldKey::HookOnLaunch, FieldValue::List(v)) => {
-            set_or_clear_override(
-                v.clone(),
-                &global.hooks.on_launch,
-                &mut config.hooks,
-                |s, val| s.on_launch = val,
-            );
+            set_profile_override(v.clone(), &mut config.hooks, |s, val| s.on_launch = val);
         }
         _ => {}
     }
-}
-
-fn parse_env_values_list(entries: &[String]) -> HashMap<String, String> {
-    entries
-        .iter()
-        .filter_map(|entry| {
-            if let Some((key, value)) = entry.split_once('=') {
-                Some((key.to_string(), value.to_string()))
-            } else {
-                tracing::warn!(
-                    "Ignoring malformed environment value (missing '='): {}",
-                    entry
-                );
-                None
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1431,5 +1565,84 @@ mod tests {
                 option
             );
         }
+    }
+
+    #[test]
+    fn test_profile_override_preserved_when_matching_global() {
+        let global = Config::default();
+        let mut profile = ProfileConfig::default();
+
+        // Set a profile override that matches the global value
+        let global_check_enabled = global.updates.check_enabled;
+        profile.updates = Some(crate::session::UpdatesConfigOverride {
+            check_enabled: Some(global_check_enabled),
+            ..Default::default()
+        });
+
+        // Apply the same value through the field system
+        let fields = build_fields_for_category(
+            SettingsCategory::Updates,
+            SettingsScope::Profile,
+            &global,
+            &profile,
+        );
+        let field = fields
+            .iter()
+            .find(|f| f.key == FieldKey::CheckEnabled)
+            .unwrap();
+
+        // Re-apply the field (simulates user saving without changing the value)
+        apply_field_to_profile(field, &global, &mut profile);
+
+        // The override should still be present
+        assert!(
+            profile
+                .updates
+                .as_ref()
+                .and_then(|u| u.check_enabled)
+                .is_some(),
+            "Profile override should be preserved even when value matches global"
+        );
+    }
+
+    #[test]
+    fn test_bool_toggle_back_to_global_preserves_override() {
+        let global = Config::default();
+        let mut profile = ProfileConfig::default();
+        let original = global.updates.check_enabled;
+
+        // Toggle to non-global value
+        profile.updates = Some(crate::session::UpdatesConfigOverride {
+            check_enabled: Some(!original),
+            ..Default::default()
+        });
+
+        // Now toggle back to match global
+        let field = SettingField {
+            key: FieldKey::CheckEnabled,
+            label: "Check Enabled",
+            description: "",
+            value: FieldValue::Bool(original),
+            category: SettingsCategory::Updates,
+            has_override: true,
+            inherited_display: None,
+        };
+
+        apply_field_to_profile(&field, &global, &mut profile);
+
+        // Override should still be present (not silently cleared)
+        assert!(
+            profile
+                .updates
+                .as_ref()
+                .and_then(|u| u.check_enabled)
+                .is_some(),
+            "Toggling back to match global should preserve the override, not silently clear it"
+        );
+        assert_eq!(
+            profile.updates.as_ref().unwrap().check_enabled,
+            Some(original),
+            "Override value should match what was set"
+        );
     }
 }

@@ -7,7 +7,10 @@ use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::DialogResult;
-use crate::tui::components::{render_text_field, ListPicker, ListPickerResult};
+use crate::tui::components::{
+    render_text_field, render_text_field_with_ghost, GroupGhostCompletion, ListPicker,
+    ListPickerResult,
+};
 use crate::tui::styles::Theme;
 
 /// Data returned when the rename dialog is submitted
@@ -32,6 +35,7 @@ pub struct RenameDialog {
     focused_field: usize, // 0 = title, 1 = group, 2 = profile
     existing_groups: Vec<String>,
     group_picker: ListPicker,
+    group_ghost: Option<GroupGhostCompletion>,
 }
 
 impl RenameDialog {
@@ -58,6 +62,7 @@ impl RenameDialog {
             focused_field: 0,
             existing_groups,
             group_picker: ListPicker::new("Select Group"),
+            group_ghost: None,
         }
     }
 
@@ -81,6 +86,23 @@ impl RenameDialog {
         };
     }
 
+    fn recompute_group_ghost(&mut self) {
+        self.group_ghost = GroupGhostCompletion::compute(&self.new_group, &self.existing_groups);
+    }
+
+    fn accept_group_ghost(&mut self) {
+        if let Some(ghost) = self.group_ghost.take() {
+            if let Some(new_value) = ghost.accept(&self.new_group) {
+                self.new_group = Input::new(new_value);
+                self.recompute_group_ghost();
+            }
+        }
+    }
+
+    fn group_ghost_text(&self) -> Option<&str> {
+        self.group_ghost.as_ref().map(|g| g.ghost_text())
+    }
+
     fn selected_profile(&self) -> &str {
         &self.available_profiles[self.profile_index]
     }
@@ -90,6 +112,7 @@ impl RenameDialog {
         if self.group_picker.is_active() {
             if let ListPickerResult::Selected(value) = self.group_picker.handle_key(key) {
                 self.new_group = Input::new(value);
+                self.group_ghost = None;
             }
             return DialogResult::Continue;
         }
@@ -102,6 +125,20 @@ impl RenameDialog {
         {
             self.group_picker.activate(self.existing_groups.clone());
             return DialogResult::Continue;
+        }
+
+        // Right/End arrow at end of group input with ghost: accept ghost text
+        if self.focused_field == 1
+            && matches!(key.code, KeyCode::Right | KeyCode::End)
+            && key.modifiers == KeyModifiers::NONE
+            && self.group_ghost.is_some()
+        {
+            let cursor = self.new_group.visual_cursor();
+            let char_len = self.new_group.value().chars().count();
+            if cursor >= char_len {
+                self.accept_group_ghost();
+                return DialogResult::Continue;
+            }
         }
 
         match key.code {
@@ -148,14 +185,29 @@ impl RenameDialog {
                 } else {
                     self.next_field();
                 }
+                if self.focused_field == 1 {
+                    self.recompute_group_ghost();
+                } else {
+                    self.group_ghost = None;
+                }
                 DialogResult::Continue
             }
             KeyCode::Down => {
                 self.next_field();
+                if self.focused_field == 1 {
+                    self.recompute_group_ghost();
+                } else {
+                    self.group_ghost = None;
+                }
                 DialogResult::Continue
             }
             KeyCode::Up => {
                 self.prev_field();
+                if self.focused_field == 1 {
+                    self.recompute_group_ghost();
+                } else {
+                    self.group_ghost = None;
+                }
                 DialogResult::Continue
             }
             KeyCode::Left if self.focused_field == 2 => {
@@ -175,6 +227,9 @@ impl RenameDialog {
             _ => {
                 if let Some(input) = self.focused_input() {
                     input.handle_event(&crossterm::event::Event::Key(key));
+                }
+                if self.focused_field == 1 {
+                    self.recompute_group_ghost();
                 }
                 DialogResult::Continue
             }
@@ -255,13 +310,14 @@ impl RenameDialog {
         } else {
             None
         };
-        render_text_field(
+        render_text_field_with_ghost(
             frame,
             chunks[5],
             "New group:",
             &self.new_group,
             self.focused_field == 1,
             group_hint,
+            self.group_ghost_text(),
             theme,
         );
 
@@ -295,6 +351,10 @@ impl RenameDialog {
             Span::raw(" switch  "),
         ];
         if self.focused_field == 1 && !self.existing_groups.is_empty() {
+            if self.group_ghost_text().is_some() {
+                hint_spans.push(Span::styled("→", Style::default().fg(theme.hint)));
+                hint_spans.push(Span::raw(" accept  "));
+            }
             hint_spans.push(Span::styled("C-p", Style::default().fg(theme.hint)));
             hint_spans.push(Span::raw(" groups  "));
         }
@@ -1013,5 +1073,86 @@ mod tests {
             }
             _ => panic!("Expected Submit"),
         }
+    }
+
+    // --- Group ghost autocomplete tests ---
+
+    #[test]
+    fn test_group_ghost_appears_on_typing() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab)); // Focus group field
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(dialog.group_ghost_text(), Some("ersonal"));
+    }
+
+    #[test]
+    fn test_group_ghost_none_when_no_match() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('z')));
+        assert!(dialog.group_ghost_text().is_none());
+    }
+
+    #[test]
+    fn test_group_ghost_accept_with_right_arrow() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(key(KeyCode::Right));
+        assert_eq!(dialog.new_group.value(), "personal");
+    }
+
+    #[test]
+    fn test_group_ghost_accept_with_end_key() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(key(KeyCode::End));
+        assert_eq!(dialog.new_group.value(), "personal");
+    }
+
+    #[test]
+    fn test_group_ghost_cleared_on_field_switch() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab)); // Focus group field
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(key(KeyCode::Tab)); // Move to profile field
+        assert!(dialog.group_ghost_text().is_none());
+    }
+
+    #[test]
+    fn test_group_ghost_common_prefix_for_multiple_matches() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('w')));
+        // "work" and "work/frontend" share common prefix "work"
+        // Ghost should show "ork" (common prefix minus typed "w")
+        assert_eq!(dialog.group_ghost_text(), Some("ork"));
+    }
+
+    #[test]
+    fn test_group_ghost_cleared_on_picker_select() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('w')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(ctrl_p()); // Open picker
+        dialog.handle_key(key(KeyCode::Enter)); // Select "work"
+        assert!(dialog.group_ghost_text().is_none());
+        assert_eq!(dialog.new_group.value(), "work");
     }
 }
