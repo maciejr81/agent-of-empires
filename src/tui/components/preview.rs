@@ -1,5 +1,6 @@
 //! Preview panel component
 
+use ansi_to_tui::IntoText;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
@@ -18,9 +19,9 @@ impl Preview {
         theme: &Theme,
     ) {
         let info_height = if instance.sandbox_info.as_ref().is_some_and(|s| s.enabled) {
-            5
+            4 // title + path + status + sandbox
         } else {
-            4
+            3 // title + path + status
         };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -91,12 +92,8 @@ impl Preview {
                 .alignment(Alignment::Center);
             frame.render_widget(hint, inner);
         } else {
-            let output_lines: Vec<Line> = cached_output
-                .lines()
-                .map(|line| Line::from(Span::raw(line)))
-                .collect();
-
-            let line_count = output_lines.len();
+            let output_text = parse_output_text(cached_output);
+            let line_count = output_text.lines.len();
             let visible_height = inner.height as usize;
 
             let scroll_offset = if line_count > visible_height {
@@ -105,7 +102,7 @@ impl Preview {
                 0
             };
 
-            let paragraph = Paragraph::new(output_lines)
+            let paragraph = Paragraph::new(output_text)
                 .style(Style::default().fg(theme.text))
                 .scroll((scroll_offset, 0));
 
@@ -120,11 +117,12 @@ impl Preview {
         cached_output: &str,
         theme: &Theme,
     ) {
-        // Adjust height based on whether worktree info is present
+        // 3 base lines (profile+tool / path / status) + optional worktree block
+        let base = 3;
         let info_height = if instance.worktree_info.is_some() {
-            10 // Expanded to show worktree details
+            base + 4 // blank + header + branch + main
         } else {
-            6 // Standard height
+            base
         };
 
         let chunks = Layout::default()
@@ -140,21 +138,32 @@ impl Preview {
     }
 
     fn render_info(frame: &mut Frame, area: Rect, instance: &Instance, theme: &Theme) {
-        let mut info_lines = vec![
-            Line::from(vec![
-                Span::styled("Title:   ", Style::default().fg(theme.dimmed)),
-                Span::styled(&instance.title, Style::default().fg(theme.text).bold()),
-            ]),
+        let mut info_lines = Vec::new();
+
+        // Profile and Tool on the same row to save vertical space
+        let mut profile_tool_spans = Vec::new();
+        if !instance.source_profile.is_empty() {
+            profile_tool_spans.push(Span::styled("Profile: ", Style::default().fg(theme.dimmed)));
+            profile_tool_spans.push(Span::styled(
+                &instance.source_profile,
+                Style::default().fg(theme.accent),
+            ));
+            profile_tool_spans.push(Span::raw("  "));
+        }
+        profile_tool_spans.push(Span::styled("Tool: ", Style::default().fg(theme.dimmed)));
+        profile_tool_spans.push(Span::styled(
+            &instance.tool,
+            Style::default().fg(theme.accent),
+        ));
+        info_lines.push(Line::from(profile_tool_spans));
+
+        info_lines.extend([
             Line::from(vec![
                 Span::styled("Path:    ", Style::default().fg(theme.dimmed)),
                 Span::styled(
                     shorten_path(&instance.project_path),
                     Style::default().fg(theme.text),
                 ),
-            ]),
-            Line::from(vec![
-                Span::styled("Tool:    ", Style::default().fg(theme.dimmed)),
-                Span::styled(&instance.tool, Style::default().fg(theme.accent)),
             ]),
             Line::from(vec![
                 Span::styled("Status:  ", Style::default().fg(theme.dimmed)),
@@ -172,18 +181,7 @@ impl Preview {
                     }),
                 ),
             ]),
-            Line::from(vec![
-                Span::styled("Group:   ", Style::default().fg(theme.dimmed)),
-                Span::styled(
-                    if instance.group_path.is_empty() {
-                        "(none)"
-                    } else {
-                        &instance.group_path
-                    },
-                    Style::default().fg(theme.group),
-                ),
-            ]),
-        ];
+        ]);
 
         // Add worktree information if present
         if let Some(wt_info) = &instance.worktree_info {
@@ -202,23 +200,6 @@ impl Preview {
                 Span::styled(
                     shorten_path(&wt_info.main_repo_path),
                     Style::default().fg(theme.text),
-                ),
-            ]));
-
-            let managed_text = if wt_info.managed_by_aoe {
-                "Yes (delete branch on aoe session delete)"
-            } else {
-                "No (manual worktree)"
-            };
-            info_lines.push(Line::from(vec![
-                Span::styled("Managed: ", Style::default().fg(theme.dimmed)),
-                Span::styled(
-                    managed_text,
-                    Style::default().fg(if wt_info.managed_by_aoe {
-                        theme.worktree_managed
-                    } else {
-                        theme.worktree_manual
-                    }),
                 ),
             ]));
         }
@@ -266,12 +247,8 @@ impl Preview {
                 .alignment(Alignment::Center);
             frame.render_widget(hint, inner);
         } else {
-            let output_lines: Vec<Line> = cached_output
-                .lines()
-                .map(|line| Line::from(Span::raw(line)))
-                .collect();
-
-            let line_count = output_lines.len();
+            let output_text = parse_output_text(cached_output);
+            let line_count = output_text.lines.len();
             let visible_height = inner.height as usize;
 
             // Scroll to show the bottom of the content
@@ -281,13 +258,19 @@ impl Preview {
                 0
             };
 
-            let paragraph = Paragraph::new(output_lines)
+            let paragraph = Paragraph::new(output_text)
                 .style(Style::default().fg(theme.text))
                 .scroll((scroll_offset, 0));
 
             frame.render_widget(paragraph, inner);
         }
     }
+}
+
+fn parse_output_text(content: &str) -> Text<'static> {
+    content
+        .into_text()
+        .unwrap_or_else(|_| Text::from(content.to_string()))
 }
 
 fn shorten_path(path: &str) -> String {

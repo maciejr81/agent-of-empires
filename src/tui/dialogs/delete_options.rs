@@ -44,8 +44,8 @@ pub struct UnifiedDeleteDialog {
 }
 
 impl UnifiedDeleteDialog {
-    pub fn new(session_title: String, config: DeleteDialogConfig) -> Self {
-        let user_config = crate::session::Config::load().ok().unwrap_or_default();
+    pub fn new(session_title: String, config: DeleteDialogConfig, profile: &str) -> Self {
+        let user_config = crate::session::resolve_config(profile).unwrap_or_default();
 
         let options = DeleteOptions {
             delete_worktree: config.worktree_branch.is_some() && user_config.worktree.auto_cleanup,
@@ -239,6 +239,7 @@ impl UnifiedDeleteDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.error))
             .title(" Delete Session ")
             .title_style(Style::default().fg(theme.error).bold());
@@ -482,7 +483,11 @@ mod tests {
     }
 
     fn simple_dialog() -> UnifiedDeleteDialog {
-        UnifiedDeleteDialog::new("Test Session".to_string(), DeleteDialogConfig::default())
+        UnifiedDeleteDialog::new(
+            "Test Session".to_string(),
+            DeleteDialogConfig::default(),
+            "default",
+        )
     }
 
     fn full_dialog() -> UnifiedDeleteDialog {
@@ -492,6 +497,7 @@ mod tests {
                 worktree_branch: Some("feature-branch".to_string()),
                 has_sandbox: true,
             },
+            "default",
         )
     }
 

@@ -6,10 +6,12 @@ mod custom_instruction;
 mod delete_options;
 mod group_delete_options;
 mod hook_trust;
+mod hooks_install;
 mod info;
 mod new_session;
 mod profile_picker;
 mod rename;
+mod send_message;
 mod welcome;
 
 pub use changelog::ChangelogDialog;
@@ -18,10 +20,12 @@ pub use custom_instruction::CustomInstructionDialog;
 pub use delete_options::{DeleteDialogConfig, DeleteOptions, UnifiedDeleteDialog};
 pub use group_delete_options::{GroupDeleteOptions, GroupDeleteOptionsDialog};
 pub use hook_trust::{HookTrustAction, HookTrustDialog};
+pub use hooks_install::HooksInstallDialog;
 pub use info::InfoDialog;
 pub use new_session::{NewSessionData, NewSessionDialog};
 pub use profile_picker::{ProfileEntry, ProfilePickerAction, ProfilePickerDialog};
-pub use rename::{RenameData, RenameDialog};
+pub use rename::{RenameData, RenameDialog, RenameMode};
+pub use send_message::SendMessageDialog;
 pub use welcome::WelcomeDialog;
 
 pub enum DialogResult<T> {

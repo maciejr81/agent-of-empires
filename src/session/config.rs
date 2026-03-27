@@ -104,6 +104,9 @@ pub struct AppStateConfig {
     #[serde(default)]
     pub has_seen_custom_instruction_warning: bool,
 
+    #[serde(default)]
+    pub has_acknowledged_agent_hooks: bool,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<SortOrder>,
 
@@ -231,6 +234,11 @@ pub struct WorktreeConfig {
     /// Default: false (unchecked in delete dialog)
     #[serde(default)]
     pub delete_branch_on_cleanup: bool,
+
+    /// Path template for multi-repo workspace directories.
+    /// Supports {branch} and {session-id} placeholders.
+    #[serde(default = "default_workspace_template")]
+    pub workspace_path_template: String,
 }
 
 impl Default for WorktreeConfig {
@@ -242,6 +250,7 @@ impl Default for WorktreeConfig {
             auto_cleanup: true,
             show_branch_in_tui: true,
             delete_branch_on_cleanup: false,
+            workspace_path_template: default_workspace_template(),
         }
     }
 }
@@ -252,6 +261,10 @@ fn default_worktree_template() -> String {
 
 fn default_bare_repo_template() -> String {
     "./{branch}".to_string()
+}
+
+fn default_workspace_template() -> String {
+    "../{branch}-workspace-{session-id}".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -924,5 +937,31 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.diff.default_branch, Some("main".to_string()));
         assert_eq!(config.diff.context_lines, 10);
+    }
+
+    #[test]
+    fn test_session_config_agent_override_roundtrip() {
+        let mut config = Config::default();
+        config
+            .session
+            .agent_command_override
+            .insert("claude".to_string(), "safehouse".to_string());
+        config
+            .session
+            .agent_extra_args
+            .insert("opencode".to_string(), "--port 8080".to_string());
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            deserialized.session.agent_command_override.get("claude"),
+            Some(&"safehouse".to_string()),
+            "agent_command_override should survive roundtrip"
+        );
+        assert_eq!(
+            deserialized.session.agent_extra_args.get("opencode"),
+            Some(&"--port 8080".to_string()),
+            "agent_extra_args should survive roundtrip"
+        );
     }
 }

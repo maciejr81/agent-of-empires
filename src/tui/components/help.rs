@@ -7,7 +7,7 @@ use crate::session::config::SortOrder;
 use crate::tui::styles::Theme;
 
 const DIALOG_WIDTH: u16 = 50;
-const DIALOG_HEIGHT: u16 = 36;
+const DIALOG_HEIGHT: u16 = 39;
 #[cfg(test)]
 const BORDER_HEIGHT: u16 = 2;
 #[cfg(test)]
@@ -32,10 +32,13 @@ fn shortcuts() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             "Actions",
             vec![
                 ("Enter", "Attach to session"),
+                ("T", "Attach to terminal"),
                 ("n", "New session"),
+                ("N", "New from selection"),
                 ("x", "Stop session"),
                 ("d", "Delete session/group"),
                 ("r", "Rename session"),
+                ("m", "Send message to agent"),
                 ("a", "Toggle star (user-active)"),
                 ("A", "Filter starred only"),
             ],
@@ -102,6 +105,7 @@ impl HelpOverlay {
         let block = Block::default()
             .style(Style::default().bg(theme.background))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border))
             .title(Line::styled(
                 " Keyboard Shortcuts ",

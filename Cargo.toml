@@ -3,9 +3,9 @@ members = [".", "xtask"]
 
 [package]
 name = "agent-of-empires"
-version = "0.15.1"
+version = "1.0.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 authors = ["Agent of Empires Contributors"]
 description = "Terminal session manager for AI coding agents"
 license = "MIT"
@@ -19,18 +19,19 @@ clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
 
 # TUI
-ratatui = { version = "0.29", features = ["crossterm"] }
-crossterm = "0.28"
-tui-textarea = "0.7"
-tui-input = "0.11"
+ratatui = { version = "0.30", features = ["crossterm"] }
+crossterm = "0.29"
+ansi-to-tui = "8.0"
+ratatui-textarea = "0.8"
+tui-input = "0.15"
 
 # Async runtime
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.50", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.9"
+toml = "1.0"
 
 # File watching
 notify = "8.2"
@@ -49,7 +50,7 @@ anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 
 # UUID generation
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.22", features = ["v4"] }
 
 # Random
 rand = "0.10"
@@ -94,7 +95,7 @@ fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3.14"
-serial_test = "3.2"
+serial_test = "3.4"
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy"] }
 
 [profile.release]

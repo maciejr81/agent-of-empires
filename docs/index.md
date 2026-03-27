@@ -11,8 +11,8 @@ AoE lets you run multiple AI agents in parallel -- each in its own tmux session,
 <iframe
 width="100%"
 style="aspect-ratio:16/9;border-radius:8px"
-src="https://www.youtube-nocookie.com/embed/Kk8dX_F-P4E"
-title="Agent of Empires Demo"
+src="https://www.youtube-nocookie.com/embed/videoseries?list=UUjGgsnOCZXvvk6UwUQAuwPg"
+title="Agent of Empires YouTube Channel"
 frameborder="0"
 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
 allowfullscreen
@@ -34,7 +34,7 @@ allowfullscreen
 
 ## Supported Agents
 
-Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, and Pi. AoE auto-detects which are installed.
+Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, and Pi. AoE auto-detects which are installed.
 
 <div class="cta-box">
 <p><strong>Ready to get started?</strong></p>

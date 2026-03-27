@@ -1,12 +1,12 @@
 ---
-layout: ../../../layouts/Docs.astro
+layout: ../../layouts/Docs.astro
 title: "Docker Sandbox: Quick Reference"
 description: Run AI coding agents in isolated Docker containers with Agent of Empires.
 ---
 
 ## Overview
 
-Docker sandboxing runs your AI coding agents (Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Pi) inside isolated Docker containers while maintaining access to your project files and credentials.
+Docker sandboxing runs your AI coding agents (Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, Pi) inside isolated Docker containers while maintaining access to your project files and credentials.
 
 **Key Features:**
 - One container per session
@@ -173,7 +173,7 @@ AOE provides two official sandbox images:
 
 | Image | Description |
 |-------|-------------|
-| `ghcr.io/njbrake/aoe-sandbox:latest` | Base image with Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Pi, git, ripgrep, fzf |
+| `ghcr.io/njbrake/aoe-sandbox:latest` | Base image with Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, Pi, git, ripgrep, fzf |
 | `ghcr.io/njbrake/aoe-dev-sandbox:latest` | Extended image with additional dev tools |
 
 ### Dev Sandbox Tools
@@ -305,7 +305,6 @@ git fetch origin
 git worktree add main main
 ```
 
-See the [Workflow Guide](/docs/guides/workflow/) for detailed bare repo setup instructions.
 
 ## Troubleshooting
 

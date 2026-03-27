@@ -10,8 +10,13 @@ mod macos;
 
 /// Get the PID of the shell process running in a tmux pane
 pub fn get_pane_pid(session_name: &str) -> Option<u32> {
+    // Use `^.0` to target the first window's first pane regardless of
+    // base-index or which pane is active, so we always query the agent's
+    // pane even when the user has created additional tmux windows or split
+    // panes.  See #435, #488.
+    let target = format!("{session_name}:^.0");
     let output = Command::new("tmux")
-        .args(["display-message", "-t", session_name, "-p", "#{pane_pid}"])
+        .args(["display-message", "-t", &target, "-p", "#{pane_pid}"])
         .output()
         .ok()?;
 

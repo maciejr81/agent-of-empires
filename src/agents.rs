@@ -24,11 +24,23 @@ pub enum YoloMode {
     AlwaysYolo,
 }
 
+/// A single hook event that AoE registers in an agent's settings file.
+pub struct HookEvent {
+    /// Event name as the agent expects it (e.g. `"PreToolUse"` for Claude Code).
+    pub name: &'static str,
+    /// Optional matcher pattern (e.g. `"permission_prompt|elicitation_dialog"`).
+    pub matcher: Option<&'static str>,
+    /// AoE status to write when this event fires (`"running"`, `"idle"`, `"waiting"`).
+    pub status: Option<&'static str>,
+}
+
 /// Configuration for installing status-detection hooks into an agent's settings file.
 pub struct AgentHookConfig {
-    /// Path relative to the project/home dir where the agent's settings live
+    /// Path relative to the home dir where the agent's settings live
     /// (e.g. `.claude/settings.json`).
     pub settings_rel_path: &'static str,
+    /// Hook events to register (status transitions).
+    pub events: &'static [HookEvent],
 }
 
 /// Everything we know about a single agent CLI.
@@ -60,6 +72,35 @@ pub struct AgentDef {
     pub hook_config: Option<AgentHookConfig>,
 }
 
+/// Hook events shared by Claude Code and Cursor CLI.
+const CLAUDE_CURSOR_HOOK_EVENTS: &[HookEvent] = &[
+    HookEvent {
+        name: "PreToolUse",
+        matcher: None,
+        status: Some("running"),
+    },
+    HookEvent {
+        name: "UserPromptSubmit",
+        matcher: None,
+        status: Some("running"),
+    },
+    HookEvent {
+        name: "Stop",
+        matcher: None,
+        status: Some("idle"),
+    },
+    HookEvent {
+        name: "Notification",
+        matcher: Some("permission_prompt|elicitation_dialog"),
+        status: Some("waiting"),
+    },
+    HookEvent {
+        name: "ElicitationResult",
+        matcher: None,
+        status: Some("running"),
+    },
+];
+
 pub const AGENTS: &[AgentDef] = &[
     AgentDef {
         name: "claude",
@@ -74,6 +115,7 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("CLAUDE_CONFIG_DIR", "/root/.claude")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".claude/settings.json",
+            events: CLAUDE_CURSOR_HOOK_EVENTS,
         }),
     },
     AgentDef {
@@ -128,7 +170,31 @@ pub const AGENTS: &[AgentDef] = &[
         supports_host_launch: true,
         detect_status: status_detection::detect_gemini_status,
         container_env: &[],
-        hook_config: None,
+        hook_config: Some(AgentHookConfig {
+            settings_rel_path: ".gemini/settings.json",
+            events: &[
+                HookEvent {
+                    name: "BeforeTool",
+                    matcher: None,
+                    status: Some("running"),
+                },
+                HookEvent {
+                    name: "BeforeAgent",
+                    matcher: None,
+                    status: Some("running"),
+                },
+                HookEvent {
+                    name: "AfterAgent",
+                    matcher: None,
+                    status: Some("idle"),
+                },
+                HookEvent {
+                    name: "Notification",
+                    matcher: Some("ToolPermission"),
+                    status: Some("waiting"),
+                },
+            ],
+        }),
     },
     AgentDef {
         name: "cursor",
@@ -143,7 +209,21 @@ pub const AGENTS: &[AgentDef] = &[
         container_env: &[("CURSOR_CONFIG_DIR", "/root/.cursor")],
         hook_config: Some(AgentHookConfig {
             settings_rel_path: ".cursor/settings.json",
+            events: CLAUDE_CURSOR_HOOK_EVENTS,
         }),
+    },
+    AgentDef {
+        name: "copilot",
+        binary: "copilot",
+        aliases: &["github-copilot"],
+        detection: DetectionMethod::Which("copilot"),
+        yolo: Some(YoloMode::CliFlag("--yolo")),
+        instruction_flag: None,
+        set_default_command: false,
+        supports_host_launch: true,
+        detect_status: status_detection::detect_copilot_status,
+        container_env: &[("COPILOT_CONFIG_DIR", "/root/.copilot")],
+        hook_config: None,
     },
     AgentDef {
         name: "pi",
@@ -224,6 +304,7 @@ mod tests {
         assert_eq!(get_agent("codex").unwrap().binary, "codex");
         assert_eq!(get_agent("gemini").unwrap().binary, "gemini");
         assert_eq!(get_agent("cursor").unwrap().binary, "agent");
+        assert_eq!(get_agent("copilot").unwrap().binary, "copilot");
         assert_eq!(get_agent("pi").unwrap().binary, "pi");
     }
 
@@ -237,7 +318,7 @@ mod tests {
         let names = agent_names();
         assert_eq!(
             names,
-            vec!["claude", "opencode", "vibe", "codex", "gemini", "cursor", "pi"]
+            vec!["claude", "opencode", "vibe", "codex", "gemini", "cursor", "copilot", "pi"]
         );
     }
 
@@ -249,6 +330,8 @@ mod tests {
         assert_eq!(resolve_tool_name("codex"), Some("codex"));
         assert_eq!(resolve_tool_name("gemini"), Some("gemini"));
         assert_eq!(resolve_tool_name("cursor"), Some("cursor"));
+        assert_eq!(resolve_tool_name("github-copilot"), Some("copilot"));
+        assert_eq!(resolve_tool_name("copilot"), Some("copilot"));
         assert_eq!(resolve_tool_name("pi"), Some("pi"));
         assert_eq!(resolve_tool_name(""), Some("claude"));
         assert_eq!(resolve_tool_name("agent"), Some("cursor"));
@@ -261,13 +344,15 @@ mod tests {
         assert_eq!(settings_index_from_name(Some("claude")), 1);
         assert_eq!(settings_index_from_name(Some("gemini")), 5);
         assert_eq!(settings_index_from_name(Some("cursor")), 6);
-        assert_eq!(settings_index_from_name(Some("pi")), 7);
+        assert_eq!(settings_index_from_name(Some("copilot")), 7);
+        assert_eq!(settings_index_from_name(Some("pi")), 8);
 
         assert_eq!(name_from_settings_index(0), None);
         assert_eq!(name_from_settings_index(1), Some("claude"));
         assert_eq!(name_from_settings_index(5), Some("gemini"));
         assert_eq!(name_from_settings_index(6), Some("cursor"));
-        assert_eq!(name_from_settings_index(7), Some("pi"));
+        assert_eq!(name_from_settings_index(7), Some("copilot"));
+        assert_eq!(name_from_settings_index(8), Some("pi"));
         assert_eq!(name_from_settings_index(99), None);
     }
 

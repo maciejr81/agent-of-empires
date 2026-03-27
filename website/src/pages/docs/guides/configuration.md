@@ -39,7 +39,7 @@ All settings below can also be edited from the TUI settings screen (press `s` or
 | Variable | Description |
 |----------|-------------|
 | `AGENT_OF_EMPIRES_PROFILE` | Default profile to use |
-| `AGENT_OF_EMPIRES_DEBUG` | Enable debug logging (`1` to enable) |
+| `AGENT_OF_EMPIRES_DEBUG` | Enable debug logging to `debug.log` in app data dir (`1` to enable) |
 
 ## Session
 
@@ -190,4 +190,4 @@ Per-repo settings go in `.aoe/config.toml` at your project root. Run `aoe init` 
 
 Repo config supports: `[hooks]`, `[session]`, `[sandbox]`, and `[worktree]` sections. It does not support `[tmux]`, `[updates]`, `[claude]`, or `[diff]` -- those are personal settings.
 
-See [Repo Config & Hooks](/docs/guides/repo-config/) for details.
+See [Repo Config & Hooks](/guides/repo-config/) for details.

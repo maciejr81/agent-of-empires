@@ -6,6 +6,7 @@
     <a href="https://github.com/njbrake/agent-of-empires/releases"><img src="https://img.shields.io/github/v/release/njbrake/agent-of-empires" alt="GitHub release"></a>
     <a href="https://formulae.brew.sh/formula/aoe"><img src="https://img.shields.io/homebrew/v/aoe" alt="Homebrew"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+    <a href="https://clawhub.ai/njbrake/aoe"><img src="https://img.shields.io/badge/ClawHub-aoe-blue" alt="ClawHub"></a>
     <br>
     <a href="https://www.youtube.com/@agent-of-empires"><img src="https://img.shields.io/badge/YouTube-channel-red?logo=youtube" alt="YouTube"></a>
     <a href="https://x.com/natebrake"><img src="https://img.shields.io/badge/follow-%40natebrake-black?logo=x&logoColor=white" alt="Follow @natebrake"></a>
@@ -22,7 +23,7 @@ Run multiple AI agents in parallel across different branches of your codebase, e
 
 ## Features
 
-- **Multi-agent support** -- Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, and Pi.dev
+- **Multi-agent support** -- Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, and Pi.dev
 - **TUI dashboard** -- visual interface to create, monitor, and manage sessions
 - **Agent + terminal views** -- toggle between your AI agents and paired shell terminals with `t`
 - **Status detection** -- see which agents are running, waiting for input, or idle
@@ -101,7 +102,7 @@ Nothing. Sessions are tmux sessions running in the background. Open and close `a
 
 ### Which AI tools are supported?
 
-Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, and Pi.dev. AoE auto-detects which are installed on your system.
+Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, and Pi.dev. AoE auto-detects which are installed on your system.
 
 ## Troubleshooting
 
@@ -129,7 +130,7 @@ cargo fmt            # Format
 cargo clippy         # Lint
 cargo build --release  # Release build
 
-# Debug logging
+# Debug logging (writes to debug.log in app data dir)
 AGENT_OF_EMPIRES_DEBUG=1 cargo run
 ```
 

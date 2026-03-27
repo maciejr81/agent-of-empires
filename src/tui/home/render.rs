@@ -59,9 +59,18 @@ impl HomeView {
             .split(area);
 
         // Layout: left panel (list) and right panel (preview)
+        // On small screens, cap list width so the preview pane gets adequate space
+        let available_width = main_chunks[0].width;
+        let effective_list_width = self
+            .list_width
+            .min(available_width.saturating_sub(40))
+            .max(10);
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(self.list_width), Constraint::Min(40)])
+            .constraints([
+                Constraint::Length(effective_list_width),
+                Constraint::Min(40),
+            ])
             .split(main_chunks[0]);
 
         self.render_list(frame, chunks[0], theme);
@@ -97,6 +106,10 @@ impl HomeView {
             dialog.render(frame, area, theme);
         }
 
+        if let Some(dialog) = &self.hooks_install_dialog {
+            dialog.render(frame, area, theme);
+        }
+
         if let Some(dialog) = &self.hook_trust_dialog {
             dialog.render(frame, area, theme);
         }
@@ -116,27 +129,33 @@ impl HomeView {
         if let Some(dialog) = &self.profile_picker_dialog {
             dialog.render(frame, area, theme);
         }
+
+        if let Some(dialog) = &self.send_message_dialog {
+            dialog.render(frame, area, theme);
+        }
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let title = match self.view_mode {
-            ViewMode::Agent => format!(" Agent of Empires [{}] ", self.storage.profile()),
-            ViewMode::Terminal => format!(" Terminals [{}] ", self.storage.profile()),
+            ViewMode::Agent => format!(" Agent of Empires [{}] ", self.active_profile_display()),
+            ViewMode::Terminal => format!(" Terminals [{}] ", self.active_profile_display()),
         };
         let (border_color, title_color) = match self.view_mode {
             ViewMode::Agent => (theme.border, theme.title),
             ViewMode::Terminal => (theme.terminal_border, theme.terminal_border),
         };
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP | Borders::LEFT | Borders::BOTTOM)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
             .title(title)
-            .title_style(Style::default().fg(title_color).bold());
+            .title_style(Style::default().fg(title_color).bold())
+            .padding(Padding::horizontal(1));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        if self.instances.is_empty() && self.groups.is_empty() {
+        if self.instances().is_empty() && !self.has_any_groups() {
             let empty_text = vec![
                 Line::from(""),
                 Line::from("No sessions yet").style(Style::default().fg(theme.dimmed)),
@@ -311,6 +330,22 @@ impl HomeView {
             style
         };
         line_spans.push(Span::styled(format!("{} ", icon), icon_style));
+
+        if let Item::Session { id, .. } = item {
+            if let Some(inst) = self.get_instance(id) {
+                if inst.user_active {
+                    line_spans.push(Span::styled(
+                        format!("{} ", ICON_USER_ACTIVE),
+                        Style::default().fg(theme.user_active),
+                    ));
+                } else {
+                    line_spans.push(Span::raw("  "));
+                }
+            } else {
+                line_spans.push(Span::raw("  "));
+            }
+        }
+
         line_spans.push(Span::styled(
             text.into_owned(),
             if is_selected { style.bold() } else { style },
@@ -318,13 +353,12 @@ impl HomeView {
 
         if let Item::Session { id, .. } = item {
             if let Some(inst) = self.get_instance(id) {
-                if inst.user_active {
+                if let Some(ws_info) = &inst.workspace_info {
                     line_spans.push(Span::styled(
-                        format!(" {}", ICON_USER_ACTIVE),
-                        Style::default().fg(theme.user_active),
+                        format!("  {} [{} repos]", ws_info.branch, ws_info.repos.len()),
+                        Style::default().fg(theme.branch),
                     ));
-                }
-                if let Some(wt_info) = &inst.worktree_info {
+                } else if let Some(wt_info) = &inst.worktree_info {
                     line_spans.push(Span::styled(
                         format!("  {}", wt_info.branch),
                         Style::default().fg(theme.branch),
@@ -365,14 +399,16 @@ impl HomeView {
     fn refresh_preview_cache_if_needed(&mut self, width: u16, height: u16) {
         const PREVIEW_REFRESH_MS: u128 = 250; // Refresh preview 4x/second max
 
-        let needs_refresh = match &self.selected_session {
-            Some(id) => {
-                self.preview_cache.session_id.as_ref() != Some(id)
-                    || self.preview_cache.dimensions != (width, height)
-                    || self.preview_cache.last_refresh.elapsed().as_millis() > PREVIEW_REFRESH_MS
-            }
+        let session_changed = match &self.selected_session {
+            Some(id) => self.preview_cache.session_id.as_ref() != Some(id),
             None => false,
         };
+        let dims_changed = self.preview_cache.dimensions != (width, height);
+        let timer_expired =
+            self.preview_cache.last_refresh.elapsed().as_millis() > PREVIEW_REFRESH_MS;
+
+        let needs_refresh =
+            self.selected_session.is_some() && (session_changed || dims_changed || timer_expired);
 
         if needs_refresh {
             if let Some(id) = &self.selected_session {
@@ -465,9 +501,11 @@ impl HomeView {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
             .title(title)
-            .title_style(Style::default().fg(title_color));
+            .title_style(Style::default().fg(title_color))
+            .padding(Padding::horizontal(1));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -623,6 +661,14 @@ impl HomeView {
             Span::styled(" n", key_style),
             Span::styled(" New ", desc_style),
         ]);
+
+        if self.selected_session.is_some() {
+            spans.extend([
+                Span::styled("│", sep_style),
+                Span::styled(" m", key_style),
+                Span::styled(" Msg ", desc_style),
+            ]);
+        }
 
         if !self.flat_items.is_empty() {
             spans.extend([

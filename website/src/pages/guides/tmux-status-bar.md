@@ -1,5 +1,5 @@
 ---
-layout: ../../../layouts/Docs.astro
+layout: ../../layouts/Docs.astro
 title: tmux Status Bar
 description: Configure the tmux status bar to display Agent of Empires session information.
 ---
@@ -11,7 +11,7 @@ Agent of Empires can display session information in your tmux status bar, showin
 
 ## How It Works
 
-When you start a session, aoe sets tmux user options (`@aoe_title`, `@aoe_branch`, `@aoe_sandbox`) and configures the status bar to display this information with aoe's phosphor green theme.
+When you start a session, aoe sets tmux user options (`@aoe_title`, `@aoe_branch`, `@aoe_sandbox`) and configures the status bar to display this information with aoe's theme colors.
 
 **Example status bars:**
 ```

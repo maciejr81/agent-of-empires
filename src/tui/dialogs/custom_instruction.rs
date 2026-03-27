@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use super::DialogResult;
 use crate::tui::styles::Theme;
@@ -89,6 +89,7 @@ impl CustomInstructionDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .title(" Edit Custom Instruction ")
             .title_style(Style::default().fg(theme.title).bold());
@@ -113,6 +114,7 @@ impl CustomInstructionDialog {
         };
         let textarea_block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(textarea_border_color));
 
         let mut text_area_clone = self.text_area.clone();

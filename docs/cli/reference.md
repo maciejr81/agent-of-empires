@@ -9,6 +9,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe init`↴](#aoe-init)
 * [`aoe list`↴](#aoe-list)
 * [`aoe remove`↴](#aoe-remove)
+* [`aoe send`↴](#aoe-send)
 * [`aoe status`↴](#aoe-status)
 * [`aoe session`↴](#aoe-session)
 * [`aoe session start`↴](#aoe-session-start)
@@ -17,6 +18,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session attach`↴](#aoe-session-attach)
 * [`aoe session show`↴](#aoe-session-show)
 * [`aoe session rename`↴](#aoe-session-rename)
+* [`aoe session capture`↴](#aoe-session-capture)
 * [`aoe session current`↴](#aoe-session-current)
 * [`aoe group`↴](#aoe-group)
 * [`aoe group list`↴](#aoe-group-list)
@@ -56,6 +58,7 @@ Run without arguments to launch the TUI dashboard.
 * `init` — Initialize .aoe/config.toml in a repository
 * `list` — List all sessions
 * `remove` — Remove a session
+* `send` — Send a message to a running agent session
 * `status` — Show session status summary
 * `session` — Manage session lifecycle (start, stop, attach, etc.)
 * `group` — Manage groups for organizing sessions
@@ -93,6 +96,7 @@ Add a new session
 * `-l`, `--launch` — Launch the session immediately after creating
 * `-w`, `--worktree <WORKTREE_BRANCH>` — Create session in a git worktree for the specified branch
 * `-b`, `--new-branch` — Create a new branch (use with --worktree)
+* `-r`, `--repo <EXTRA_REPOS>` — Additional repositories for multi-repo workspace (use with --worktree)
 * `-s`, `--sandbox` — Run session in Docker sandbox
 * `--sandbox-image <SANDBOX_IMAGE>` — Custom Docker image for sandbox (implies --sandbox)
 * `-y`, `--yolo` — Enable YOLO mode (skip permission prompts)
@@ -142,8 +146,22 @@ Remove a session
 ###### **Options:**
 
 * `--delete-worktree` — Delete worktree directory (default: keep worktree)
+* `--delete-branch` — Delete git branch after worktree removal (default: per config)
 * `--force` — Force worktree removal even with untracked/modified files
 * `--keep-container` — Keep container instead of deleting it (default: delete per config)
+
+
+
+## `aoe send`
+
+Send a message to a running agent session
+
+**Usage:** `aoe send <IDENTIFIER> <MESSAGE>`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Session ID or title
+* `<MESSAGE>` — Message to send to the agent
 
 
 
@@ -175,6 +193,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `attach` — Attach to session interactively
 * `show` — Show session details
 * `rename` — Rename a session
+* `capture` — Capture tmux pane output
 * `current` — Auto-detect current session
 
 
@@ -257,6 +276,26 @@ Rename a session
 
 * `-t`, `--title <TITLE>` — New title for the session
 * `-g`, `--group <GROUP>` — New group for the session (empty string to ungroup)
+
+
+
+## `aoe session capture`
+
+Capture tmux pane output
+
+**Usage:** `aoe session capture [OPTIONS] [IDENTIFIER]`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Session ID or title (auto-detects in tmux if omitted)
+
+###### **Options:**
+
+* `-n`, `--lines <LINES>` — Number of lines to capture
+
+  Default value: `50`
+* `--strip-ansi` — Strip ANSI escape codes
+* `--json` — Output as JSON
 
 
 

@@ -13,10 +13,6 @@ use crate::tmux;
 use super::container_config;
 use super::environment::{build_docker_env_args, shell_escape};
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalInfo {
     #[serde(default)]
@@ -44,6 +40,28 @@ pub struct WorktreeInfo {
     pub branch: String,
     pub main_repo_path: String,
     pub managed_by_aoe: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRepo {
+    pub name: String,
+    pub source_path: String,
+    pub branch: String,
+    pub worktree_path: String,
+    pub main_repo_path: String,
+    pub managed_by_aoe: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub branch: String,
+    pub workspace_dir: String,
+    pub repos: Vec<WorkspaceRepo>,
     pub created_at: DateTime<Utc>,
     #[serde(default = "default_true")]
     pub cleanup_on_delete: bool,
@@ -94,6 +112,13 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_info: Option<WorktreeInfo>,
 
+    // Multi-repo workspace integration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_info: Option<WorkspaceInfo>,
+
+    #[serde(default)]
+    pub user_active: bool,
+
     // Docker sandbox integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_info: Option<SandboxInfo>,
@@ -102,11 +127,9 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_info: Option<TerminalInfo>,
 
-    /// Whether the session is marked as actively worked on by the user.
-    /// Independent of agent status (Running/Waiting/Idle).
-    /// Persisted to sessions.json and remembered between launches.
-    #[serde(default)]
-    pub user_active: bool,
+    /// Runtime-only: which profile this instance was loaded from. Not persisted to disk.
+    #[serde(default, skip_serializing)]
+    pub source_profile: String,
 
     // Runtime state (not serialized)
     #[serde(skip)]
@@ -133,9 +156,11 @@ impl Instance {
             created_at: Utc::now(),
             last_accessed_at: None,
             worktree_info: None,
+            workspace_info: None,
+            user_active: false,
             sandbox_info: None,
             terminal_info: None,
-            user_active: false,
+            source_profile: String::new(),
             last_error_check: None,
             last_start_time: None,
             last_error: None,
@@ -144,6 +169,10 @@ impl Instance {
 
     pub fn is_sub_session(&self) -> bool {
         self.parent_session_id.is_some()
+    }
+
+    pub fn is_workspace(&self) -> bool {
+        self.workspace_info.is_some()
     }
 
     pub fn is_sandboxed(&self) -> bool {
@@ -293,7 +322,11 @@ impl Instance {
 
     /// Apply all configured tmux options to a session with the given name and title.
     fn apply_session_tmux_options(&self, session_name: &str, display_title: &str) {
-        let branch = self.worktree_info.as_ref().map(|w| w.branch.as_str());
+        let branch = self
+            .worktree_info
+            .as_ref()
+            .map(|w| w.branch.as_str())
+            .or_else(|| self.workspace_info.as_ref().map(|w| w.branch.as_str()));
         let sandbox = self.sandbox_display();
         crate::tmux::status_bar::apply_all_tmux_options(
             session_name,
@@ -366,7 +399,7 @@ impl Instance {
                 // Install hooks in the user's home directory settings
                 if let Some(home) = dirs::home_dir() {
                     let settings_path = home.join(hook_cfg.settings_rel_path);
-                    if let Err(e) = crate::hooks::install_hooks(&settings_path) {
+                    if let Err(e) = crate::hooks::install_hooks(&settings_path, hook_cfg.events) {
                         tracing::warn!("Failed to install agent hooks: {}", e);
                     }
                 }
@@ -459,7 +492,7 @@ impl Instance {
                                         cmd = format!("{} {}", cmd, flag);
                                     }
                                     crate::agents::YoloMode::EnvVar(key, value) => {
-                                        cmd = format!("{}={} {}", key, value, cmd);
+                                        cmd = format_env_var_prefix(key, value, &cmd);
                                     }
                                     crate::agents::YoloMode::AlwaysYolo => {}
                                 }
@@ -479,7 +512,7 @@ impl Instance {
                                 cmd = format!("{} {}", cmd, flag);
                             }
                             crate::agents::YoloMode::EnvVar(key, value) => {
-                                cmd = format!("{}={} {}", key, value, cmd);
+                                cmd = format_env_var_prefix(key, value, &cmd);
                             }
                             crate::agents::YoloMode::AlwaysYolo => {}
                         }
@@ -563,6 +596,7 @@ impl Instance {
             &self.tool,
             self.is_yolo_mode(),
             &self.id,
+            self.workspace_info.as_ref(),
         )
     }
 
@@ -609,12 +643,13 @@ impl Instance {
         Ok(())
     }
 
-    pub fn update_status(&mut self) {
-        if self.status == Status::Stopped {
+    /// Update status using pre-fetched pane metadata to avoid per-instance
+    /// subprocess spawns. Falls back to subprocess calls if metadata is missing.
+    pub fn update_status_with_metadata(&mut self, metadata: Option<&tmux::PaneMetadata>) {
+        if matches!(self.status, Status::Stopped | Status::Deleting) {
             return;
         }
 
-        // Skip expensive checks for recently errored sessions
         if self.status == Status::Error {
             if let Some(last_check) = self.last_error_check {
                 if last_check.elapsed().as_secs() < 30 {
@@ -623,7 +658,6 @@ impl Instance {
             }
         }
 
-        // Grace period for starting sessions
         if let Some(start_time) = self.last_start_time {
             if start_time.elapsed().as_secs() < 3 {
                 self.status = Status::Starting;
@@ -646,20 +680,17 @@ impl Instance {
             return;
         }
 
-        // Check hook-based status first (more reliable than tmux pane parsing)
+        let is_dead = metadata
+            .map(|m| m.pane_dead)
+            .unwrap_or_else(|| session.is_pane_dead());
+
         if let Some(hook_status) = crate::hooks::read_hook_status(&self.id) {
             tracing::trace!("hook status detection '{}': {:?}", self.title, hook_status);
-            let crashed_to_shell = !self.expects_shell() && session.is_pane_running_shell();
-            self.status = if session.is_pane_dead() || crashed_to_shell {
-                Status::Error
-            } else {
-                hook_status
-            };
+            self.status = if is_dead { Status::Error } else { hook_status };
             self.last_error = None;
             return;
         }
 
-        // Fall back to tmux pane content detection
         let detected = match session.detect_status(&self.tool) {
             Ok(status) => status,
             Err(_) => Status::Idle,
@@ -671,21 +702,32 @@ impl Instance {
             self.has_custom_command(),
             detected
         );
-        let is_shell_stale = || !self.expects_shell() && session.is_pane_running_shell();
+        let is_shell_stale = || {
+            if self.expects_shell() {
+                return false;
+            }
+            metadata
+                .and_then(|m| m.pane_current_command.as_deref())
+                .map(tmux::utils::is_shell_command)
+                .unwrap_or_else(|| session.is_pane_running_shell())
+        };
         self.status = match detected {
             Status::Idle if self.has_custom_command() => {
-                if session.is_pane_dead() || is_shell_stale() {
+                if is_dead || is_shell_stale() {
                     Status::Error
                 } else {
                     Status::Unknown
                 }
             }
-            Status::Idle if session.is_pane_dead() || is_shell_stale() => Status::Error,
+            Status::Idle if is_dead || is_shell_stale() => Status::Error,
             other => other,
         };
 
-        // Clear stale error now that the session is healthy
         self.last_error = None;
+    }
+
+    pub fn update_status(&mut self) {
+        self.update_status_with_metadata(None);
     }
 
     pub fn capture_output_with_size(
@@ -701,6 +743,16 @@ impl Instance {
 
 fn generate_id() -> String {
     Uuid::new_v4().to_string().replace("-", "")[..16].to_string()
+}
+
+/// Format an environment variable assignment as a shell-safe command prefix.
+///
+/// Uses `shell_escape` (single-quote escaping) so the value is preserved
+/// verbatim when parsed by the inner `bash -c '...'` shell created by
+/// `wrap_command_ignore_suspend`.
+fn format_env_var_prefix(key: &str, value: &str, cmd: &str) -> String {
+    let escaped = shell_escape(value);
+    format!("{}={} {}", key, escaped, cmd)
 }
 
 /// Wrap a command to disable Ctrl-Z (SIGTSTP) suspension.
@@ -773,6 +825,30 @@ mod tests {
         inst.yolo_mode = true;
         assert!(inst.is_yolo_mode());
         assert!(!inst.is_sandboxed());
+    }
+
+    #[test]
+    fn test_yolo_envvar_command_is_quoted() {
+        // EnvVar values containing JSON must be shell-escaped to prevent
+        // the inner bash from expanding special characters ({, *, ").
+        let result = format_env_var_prefix("OPENCODE_PERMISSION", r#"{"*":"allow"}"#, "opencode");
+        assert_eq!(result, r#"OPENCODE_PERMISSION='{"*":"allow"}' opencode"#);
+    }
+
+    #[test]
+    fn test_yolo_envvar_survives_suspend_wrapper() {
+        // The full chain: format_env_var_prefix -> wrap_command_ignore_suspend
+        // must preserve the JSON value through both quoting layers.
+        // Single quotes from shell_escape are escaped by wrap_command_ignore_suspend
+        // via the '\'' technique, which correctly round-trips through the shell.
+        let cmd = format_env_var_prefix("OPENCODE_PERMISSION", r#"{"*":"allow"}"#, "opencode");
+        let wrapped = wrap_command_ignore_suspend(&cmd);
+        // The inner single quotes from shell_escape become '\'' in the outer wrapper
+        assert!(
+            wrapped.contains(r#"OPENCODE_PERMISSION='\''{"*":"allow"}'\'' opencode"#),
+            "wrapped command should contain the escaped env var assignment: {}",
+            wrapped,
+        );
     }
 
     // Additional tests for is_sandboxed
@@ -891,7 +967,6 @@ mod tests {
             main_repo_path: "/home/user/repo".to_string(),
             managed_by_aoe: true,
             created_at: Utc::now(),
-            cleanup_on_delete: true,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -900,15 +975,6 @@ mod tests {
         assert_eq!(info.branch, deserialized.branch);
         assert_eq!(info.main_repo_path, deserialized.main_repo_path);
         assert_eq!(info.managed_by_aoe, deserialized.managed_by_aoe);
-        assert_eq!(info.cleanup_on_delete, deserialized.cleanup_on_delete);
-    }
-
-    #[test]
-    fn test_worktree_info_default_cleanup_on_delete() {
-        // Deserialize without cleanup_on_delete field - should default to true
-        let json = r#"{"branch":"test","main_repo_path":"/path","managed_by_aoe":true,"created_at":"2024-01-01T00:00:00Z"}"#;
-        let info: WorktreeInfo = serde_json::from_str(json).unwrap();
-        assert!(info.cleanup_on_delete);
     }
 
     // Tests for SandboxInfo
@@ -989,7 +1055,6 @@ mod tests {
             main_repo_path: "/tmp/main".to_string(),
             managed_by_aoe: true,
             created_at: Utc::now(),
-            cleanup_on_delete: true,
         });
 
         let json = serde_json::to_string(&inst).unwrap();

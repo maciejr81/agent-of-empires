@@ -6,12 +6,12 @@ use tui_input::Input;
 
 use super::{HomeView, TerminalMode, ViewMode};
 use crate::session::config::{load_config, save_config, SortOrder};
-use crate::session::{flatten_tree, list_profiles, repo_config, resolve_config, Item, Status};
+use crate::session::{list_profiles, repo_config, resolve_config, Item, Status};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{
     ConfirmDialog, DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, HookTrustAction,
-    InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction, RenameDialog,
-    UnifiedDeleteDialog,
+    HooksInstallDialog, InfoDialog, NewSessionData, NewSessionDialog, ProfilePickerAction,
+    RenameDialog, RenameMode, SendMessageDialog, UnifiedDeleteDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::settings::{SettingsAction, SettingsView};
@@ -38,9 +38,11 @@ impl HomeView {
                         self.confirm_dialog = None;
                         self.settings_close_confirm = false;
                         // Revert theme to saved config (undo any preview)
-                        if let Ok(config) = resolve_config(self.storage.profile()) {
+                        if let Ok(config) =
+                            resolve_config(self.active_profile.as_deref().unwrap_or("default"))
+                        {
                             let theme_name = if config.theme.name.is_empty() {
-                                "phosphor".to_string()
+                                "empire".to_string()
                             } else {
                                 config.theme.name
                             };
@@ -63,9 +65,11 @@ impl HomeView {
                     // Refresh config-dependent state in case settings changed
                     self.refresh_from_config();
                     // Reload theme from saved config
-                    if let Ok(config) = resolve_config(self.storage.profile()) {
+                    if let Ok(config) =
+                        resolve_config(self.active_profile.as_deref().unwrap_or("default"))
+                    {
                         let theme_name = if config.theme.name.is_empty() {
-                            "phosphor".to_string()
+                            "empire".to_string()
                         } else {
                             config.theme.name
                         };
@@ -149,6 +153,31 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.hooks_install_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.hooks_install_dialog = None;
+                    self.pending_hooks_install_data = None;
+                }
+                DialogResult::Submit(_) => {
+                    self.hooks_install_dialog = None;
+                    // Persist the acknowledgment
+                    if let Ok(mut config) =
+                        crate::session::config::load_config().map(|c| c.unwrap_or_default())
+                    {
+                        config.app_state.has_acknowledged_agent_hooks = true;
+                        let _ = crate::session::config::save_config(&config);
+                    }
+                    // Resume session creation
+                    if let Some(data) = self.pending_hooks_install_data.take() {
+                        return self.continue_session_creation(data);
+                    }
+                }
+            }
+            return None;
+        }
+
         if let Some(dialog) = &mut self.hook_trust_dialog {
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
@@ -203,29 +232,31 @@ impl HomeView {
                     }
                 }
                 DialogResult::Submit(data) => {
-                    // Check for hooks before creating the session
-                    match repo_config::check_hook_trust(std::path::Path::new(&data.path)) {
-                        Ok(repo_config::HookTrustStatus::NeedsTrust { hooks, hooks_hash }) => {
-                            use crate::tui::dialogs::HookTrustDialog;
-                            self.hook_trust_dialog =
-                                Some(HookTrustDialog::new(hooks, hooks_hash, data.path.clone()));
-                            self.pending_hook_trust_data = Some(data);
-                        }
-                        Ok(repo_config::HookTrustStatus::Trusted(repo_hooks)) => {
-                            let merged =
-                                self.merge_repo_hooks_onto_config_for(&data.profile, repo_hooks);
-                            return self.create_session_with_hooks(data, merged);
-                        }
-                        Ok(repo_config::HookTrustStatus::NoHooks) => {
-                            let fallback = self.resolve_global_profile_hooks_for(&data.profile);
-                            return self.create_session_with_hooks(data, fallback);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to check repo hooks: {}", e);
-                            let fallback = self.resolve_global_profile_hooks_for(&data.profile);
-                            return self.create_session_with_hooks(data, fallback);
+                    // Check if the tool uses hooks and user hasn't acknowledged yet
+                    let tool_name = if data.tool.is_empty() {
+                        "claude".to_string()
+                    } else {
+                        data.tool.clone()
+                    };
+                    let has_hooks = crate::agents::get_agent(&tool_name)
+                        .and_then(|a| a.hook_config.as_ref())
+                        .is_some();
+
+                    if has_hooks {
+                        let acknowledged = crate::session::config::load_config()
+                            .ok()
+                            .flatten()
+                            .map(|c| c.app_state.has_acknowledged_agent_hooks)
+                            .unwrap_or(false);
+
+                        if !acknowledged {
+                            self.hooks_install_dialog = Some(HooksInstallDialog::new(&tool_name));
+                            self.pending_hooks_install_data = Some(data);
+                            return None;
                         }
                     }
+
+                    return self.continue_session_creation(data);
                 }
             }
             return None;
@@ -292,19 +323,33 @@ impl HomeView {
         }
 
         if let Some(dialog) = &mut self.rename_dialog {
+            let mode = dialog.mode();
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
                 DialogResult::Cancel => {
                     self.rename_dialog = None;
+                    self.group_rename_context = None;
                 }
                 DialogResult::Submit(data) => {
                     self.rename_dialog = None;
-                    if let Err(e) = self.rename_selected(
-                        &data.title,
-                        data.group.as_deref(),
-                        data.profile.as_deref(),
-                    ) {
-                        tracing::error!("Failed to rename session: {}", e);
+                    match mode {
+                        RenameMode::Session => {
+                            if let Err(e) = self.rename_selected(
+                                &data.title,
+                                data.group.as_deref(),
+                                data.profile.as_deref(),
+                            ) {
+                                tracing::error!("Failed to rename session: {}", e);
+                            }
+                        }
+                        RenameMode::Group => {
+                            if let Err(e) = self.rename_selected_group(
+                                data.group.as_deref(),
+                                data.profile.as_deref(),
+                            ) {
+                                tracing::error!("Failed to rename group: {}", e);
+                            }
+                        }
                     }
                 }
             }
@@ -320,12 +365,25 @@ impl HomeView {
                 DialogResult::Submit(action) => match action {
                     ProfilePickerAction::Switch(name) => {
                         self.profile_picker_dialog = None;
-                        return Some(Action::SwitchProfile(name));
+                        // The synthetic "all" entry (only present in filtered mode)
+                        // switches back to all-profiles mode
+                        let profile = if self.active_profile.is_some() && name == "all" {
+                            None
+                        } else {
+                            Some(name)
+                        };
+                        if let Err(e) = self.switch_profile(profile) {
+                            tracing::error!("Failed to switch profile: {}", e);
+                        }
                     }
                     ProfilePickerAction::Created(name) => {
                         self.profile_picker_dialog = None;
                         match crate::session::create_profile(&name) {
-                            Ok(()) => return Some(Action::SwitchProfile(name)),
+                            Ok(()) => {
+                                if let Err(e) = self.switch_profile(Some(name)) {
+                                    tracing::error!("Failed to switch to new profile: {}", e);
+                                }
+                            }
                             Err(e) => {
                                 self.info_dialog = Some(InfoDialog::new(
                                     "Error",
@@ -349,6 +407,41 @@ impl HomeView {
                         }
                     }
                 },
+            }
+            return None;
+        }
+
+        // Send message dialog
+        if let Some(dialog) = &mut self.send_message_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => {
+                    self.send_message_dialog = None;
+                    self.pending_send_session = None;
+                }
+                DialogResult::Submit(message) => {
+                    self.send_message_dialog = None;
+                    if let Some(session_id) = self.pending_send_session.take() {
+                        if let Some(inst) = self.get_instance(&session_id) {
+                            match crate::tmux::Session::new(&inst.id, &inst.title) {
+                                Ok(tmux_session) => {
+                                    if let Err(e) = tmux_session.send_keys(&message) {
+                                        self.info_dialog = Some(InfoDialog::new(
+                                            "Send Failed",
+                                            &format!("Failed to send message: {}", e),
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    self.info_dialog = Some(InfoDialog::new(
+                                        "Send Failed",
+                                        &format!("Failed to resolve session: {}", e),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
             }
             return None;
         }
@@ -399,6 +492,26 @@ impl HomeView {
                     ViewMode::Terminal => ViewMode::Agent,
                 };
             }
+            KeyCode::Char('T') => {
+                // Quick-attach to paired terminal from any view
+                if let Some(id) = &self.selected_session {
+                    if let Some(inst) = self.get_instance(id) {
+                        if inst.status == Status::Deleting {
+                            return None;
+                        }
+                    }
+                    let terminal_mode = if let Some(inst) = self.get_instance(id) {
+                        if inst.is_sandboxed() {
+                            self.get_terminal_mode(id)
+                        } else {
+                            TerminalMode::Host
+                        }
+                    } else {
+                        TerminalMode::Host
+                    };
+                    return Some(Action::AttachTerminal(id.clone(), terminal_mode));
+                }
+            }
             KeyCode::Char('c') => {
                 // Toggle container/host terminal mode (only in Terminal view for sandboxed sessions)
                 if self.view_mode == ViewMode::Terminal {
@@ -429,14 +542,13 @@ impl HomeView {
                     self.update_selected();
                 } else {
                     let existing_titles: Vec<String> =
-                        self.instances.iter().map(|i| i.title.clone()).collect();
-                    let existing_groups: Vec<String> = self
-                        .group_tree
-                        .get_all_groups()
-                        .iter()
-                        .map(|g| g.path.clone())
-                        .collect();
-                    let current_profile = self.storage.profile().to_string();
+                        self.instances().iter().map(|i| i.title.clone()).collect();
+                    let existing_groups: Vec<String> =
+                        self.all_groups().iter().map(|g| g.path.clone()).collect();
+                    let current_profile = self
+                        .active_profile
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
                     let profiles =
                         list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
                     let mut dialog = NewSessionDialog::new(
@@ -447,7 +559,7 @@ impl HomeView {
                         profiles,
                     );
                     if let Some(id) = &self.selected_session {
-                        if let Some(inst) = self.instance_map.get(id) {
+                        if let Some(inst) = self.get_instance(id) {
                             dialog = dialog.with_session_context(
                                 &inst.title,
                                 &inst.project_path,
@@ -467,6 +579,57 @@ impl HomeView {
                     };
                     self.cursor = self.search_matches[self.search_match_index];
                     self.update_selected();
+                } else {
+                    // Pre-filled new session from selection
+                    let prefill_path = self
+                        .selected_session
+                        .as_ref()
+                        .and_then(|id| self.get_instance(id))
+                        .map(|inst| {
+                            inst.worktree_info
+                                .as_ref()
+                                .map(|wt| wt.main_repo_path.clone())
+                                .unwrap_or_else(|| inst.project_path.clone())
+                        });
+                    let prefill_group = self
+                        .selected_session
+                        .as_ref()
+                        .and_then(|id| self.get_instance(id))
+                        .and_then(|inst| {
+                            if inst.group_path.is_empty() {
+                                None
+                            } else {
+                                Some(inst.group_path.clone())
+                            }
+                        })
+                        .or_else(|| self.selected_group.clone());
+
+                    if prefill_path.is_some() || prefill_group.is_some() {
+                        let existing_titles: Vec<String> =
+                            self.instances().iter().map(|i| i.title.clone()).collect();
+                        let existing_groups: Vec<String> =
+                            self.all_groups().iter().map(|g| g.path.clone()).collect();
+                        let current_profile = self
+                            .profile_for_cursor(self.cursor)
+                            .or_else(|| self.active_profile.clone())
+                            .unwrap_or_else(|| "default".to_string());
+                        let profiles =
+                            list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
+                        let mut dialog = NewSessionDialog::new(
+                            self.available_tools.clone(),
+                            existing_titles,
+                            existing_groups,
+                            &current_profile,
+                            profiles,
+                        );
+                        if let Some(path) = prefill_path {
+                            dialog.set_path(path);
+                        }
+                        if let Some(group) = prefill_group {
+                            dialog.set_group(group);
+                        }
+                        self.new_dialog = Some(dialog);
+                    }
                 }
             }
             KeyCode::Char('s') => {
@@ -476,7 +639,10 @@ impl HomeView {
                     .as_ref()
                     .and_then(|id| self.get_instance(id))
                     .map(|inst| inst.project_path.clone());
-                match SettingsView::new(self.storage.profile(), project_path) {
+                match SettingsView::new(
+                    self.active_profile.as_deref().unwrap_or("default"),
+                    project_path,
+                ) {
                     Ok(view) => self.settings_view = Some(view),
                     Err(e) => {
                         tracing::error!("Failed to open settings: {}", e);
@@ -548,16 +714,23 @@ impl HomeView {
                                 .worktree_info
                                 .as_ref()
                                 .filter(|wt| wt.managed_by_aoe)
-                                .map(|wt| wt.branch.clone()),
+                                .map(|wt| wt.branch.clone())
+                                .or_else(|| inst.workspace_info.as_ref().map(|w| w.branch.clone())),
                             has_sandbox: inst.sandbox_info.as_ref().is_some_and(|s| s.enabled),
                         };
 
-                        self.unified_delete_dialog =
-                            Some(UnifiedDeleteDialog::new(inst.title.clone(), config));
+                        let profile = self.active_profile.as_deref().unwrap_or("default");
+                        self.unified_delete_dialog = Some(UnifiedDeleteDialog::new(
+                            inst.title.clone(),
+                            config,
+                            profile,
+                        ));
                     } else {
+                        let profile = self.active_profile.as_deref().unwrap_or("default");
                         self.unified_delete_dialog = Some(UnifiedDeleteDialog::new(
                             "Unknown Session".to_string(),
                             DeleteDialogConfig::default(),
+                            profile,
                         ));
                     }
                 } else if let Some(group_path) = &self.selected_group {
@@ -588,48 +761,20 @@ impl HomeView {
                     }
                 }
             }
-            KeyCode::Char('a') => {
-                if let Some(id) = &self.selected_session {
-                    let id = id.clone();
-                    self.mutate_instance(&id, |inst| inst.user_active = !inst.user_active);
-                    if let Err(e) = self.save() {
-                        tracing::error!("Failed to save user-active toggle: {}", e);
-                    }
-                    if self.filter_user_active {
-                        self.flat_items =
-                            flatten_tree(&self.group_tree, &self.instances, self.sort_order);
-                        self.filter_flat_items_if_active();
-                        self.cursor = self.cursor.min(self.flat_items.len().saturating_sub(1));
-                        self.update_selected();
-                    }
-                }
-            }
-            KeyCode::Char('A') => {
-                self.filter_user_active = !self.filter_user_active;
-                self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
-                self.filter_flat_items_if_active();
-                self.cursor = 0;
-                self.update_selected();
-                if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
-                    config.app_state.filter_user_active = self.filter_user_active;
-                    let _ = save_config(&config);
-                }
-            }
             KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
                         if inst.status == Status::Deleting {
                             return None;
                         }
-                        let current_profile = self.storage.profile().to_string();
+                        let current_profile = self
+                            .active_profile
+                            .clone()
+                            .unwrap_or_else(|| "default".to_string());
                         let profiles =
                             list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
-                        let existing_groups: Vec<String> = self
-                            .group_tree
-                            .get_all_groups()
-                            .iter()
-                            .map(|g| g.path.clone())
-                            .collect();
+                        let existing_groups: Vec<String> =
+                            self.all_groups().iter().map(|g| g.path.clone()).collect();
                         self.rename_dialog = Some(RenameDialog::new(
                             &inst.title,
                             &inst.group_path,
@@ -638,6 +783,65 @@ impl HomeView {
                             existing_groups,
                         ));
                     }
+                } else if let Some(group_path) = &self.selected_group {
+                    let group_path = group_path.clone();
+                    let current_profile = self
+                        .selected_group_profile
+                        .clone()
+                        .or_else(|| self.active_profile.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    let profiles =
+                        list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
+                    let existing_groups: Vec<String> =
+                        self.all_groups().iter().map(|g| g.path.clone()).collect();
+                    self.group_rename_context = Some(super::GroupRenameContext {
+                        old_path: group_path.clone(),
+                        old_profile: current_profile.clone(),
+                    });
+                    self.rename_dialog = Some(RenameDialog::new_for_group(
+                        &group_path,
+                        &current_profile,
+                        profiles,
+                        existing_groups,
+                    ));
+                }
+            }
+            KeyCode::Char('m') => {
+                if let Some(id) = self.selected_session.clone() {
+                    if let Some(inst) = self.get_instance(&id) {
+                        let title = inst.title.clone();
+                        let inst_id = inst.id.clone();
+                        let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
+                        let is_running = tmux_session.as_ref().is_some_and(|s| s.exists());
+                        if is_running {
+                            self.pending_send_session = Some(id);
+                            self.send_message_dialog = Some(SendMessageDialog::new(&title));
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(id) = &self.selected_session {
+                    let id = id.clone();
+                    self.mutate_instance(&id, |inst| inst.user_active = !inst.user_active);
+                    if let Err(e) = self.save() {
+                        tracing::error!("Failed to save user-active toggle: {}", e);
+                    }
+                    if self.filter_user_active {
+                        self.flat_items = self.build_flat_items();
+                        self.cursor = self.cursor.min(self.flat_items.len().saturating_sub(1));
+                        self.update_selected();
+                    }
+                }
+            }
+            KeyCode::Char('A') => {
+                self.filter_user_active = !self.filter_user_active;
+                self.flat_items = self.build_flat_items();
+                self.cursor = 0;
+                self.update_selected();
+                if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
+                    config.app_state.filter_user_active = self.filter_user_active;
+                    let _ = save_config(&config);
                 }
             }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -750,10 +954,12 @@ impl HomeView {
                 Item::Session { id, .. } => {
                     self.selected_session = Some(id.clone());
                     self.selected_group = None;
+                    self.selected_group_profile = None;
                 }
                 Item::Group { path, .. } => {
                     self.selected_session = None;
                     self.selected_group = Some(path.clone());
+                    self.selected_group_profile = self.profile_for_cursor(self.cursor);
                 }
             }
         }
@@ -761,8 +967,7 @@ impl HomeView {
 
     fn apply_sort_order(&mut self, new_order: SortOrder) {
         self.sort_order = new_order;
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
-        self.filter_flat_items_if_active();
+        self.flat_items = self.build_flat_items();
         if self.search_active && !self.search_query.value().is_empty() {
             self.update_search();
         } else {
@@ -778,9 +983,14 @@ impl HomeView {
     }
 
     fn toggle_group_collapsed(&mut self, path: &str) {
-        self.group_tree.toggle_collapsed(path);
-        self.flat_items = flatten_tree(&self.group_tree, &self.instances, self.sort_order);
-        self.filter_flat_items_if_active();
+        // Route to the correct profile's GroupTree
+        let profile = self.profile_for_cursor(self.cursor);
+        if let Some(profile) = profile {
+            if let Some(tree) = self.group_trees.get_mut(&profile) {
+                tree.toggle_collapsed(path);
+            }
+        }
+        self.flat_items = self.build_flat_items();
         if let Err(e) = self.save() {
             tracing::error!("Failed to save group state: {}", e);
         }
@@ -890,6 +1100,33 @@ impl HomeView {
         if let Some(&best) = self.search_matches.first() {
             self.cursor = best;
             self.update_selected();
+        }
+    }
+
+    /// Continue session creation after agent hooks acknowledgment.
+    /// Runs the repo hook trust check and then creates the session.
+    fn continue_session_creation(&mut self, data: NewSessionData) -> Option<Action> {
+        match repo_config::check_hook_trust(std::path::Path::new(&data.path)) {
+            Ok(repo_config::HookTrustStatus::NeedsTrust { hooks, hooks_hash }) => {
+                use crate::tui::dialogs::HookTrustDialog;
+                self.hook_trust_dialog =
+                    Some(HookTrustDialog::new(hooks, hooks_hash, data.path.clone()));
+                self.pending_hook_trust_data = Some(data);
+                None
+            }
+            Ok(repo_config::HookTrustStatus::Trusted(repo_hooks)) => {
+                let merged = self.merge_repo_hooks_onto_config_for(&data.profile, repo_hooks);
+                self.create_session_with_hooks(data, merged)
+            }
+            Ok(repo_config::HookTrustStatus::NoHooks) => {
+                let fallback = self.resolve_global_profile_hooks_for(&data.profile);
+                self.create_session_with_hooks(data, fallback)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check repo hooks: {}", e);
+                let fallback = self.resolve_global_profile_hooks_for(&data.profile);
+                self.create_session_with_hooks(data, fallback)
+            }
         }
     }
 

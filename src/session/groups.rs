@@ -183,6 +183,68 @@ impl GroupTree {
             self.rebuild_tree();
         }
     }
+
+    pub fn set_collapsed(&mut self, path: &str, collapsed: bool) {
+        if let Some(group) = self.groups_by_path.get_mut(path) {
+            if group.collapsed != collapsed {
+                group.collapsed = collapsed;
+                self.rebuild_tree();
+            }
+        }
+    }
+
+    /// Rename a group and all its descendants to a new path.
+    /// If the target path already exists, the old group is merged into it.
+    pub fn rename_group(&mut self, old_path: &str, new_path: &str) {
+        if old_path == new_path || new_path.is_empty() {
+            return;
+        }
+
+        let old_prefix = format!("{}/", old_path);
+
+        // Collect all paths to rename: the group itself + descendants
+        let paths_to_rename: Vec<String> = self
+            .insertion_order
+            .iter()
+            .filter(|p| *p == old_path || p.starts_with(&old_prefix))
+            .cloned()
+            .collect();
+
+        for old in &paths_to_rename {
+            let new = if *old == old_path {
+                new_path.to_string()
+            } else {
+                format!("{}{}", new_path, &old[old_path.len()..])
+            };
+
+            if let Some(mut group) = self.groups_by_path.remove(old) {
+                if self.groups_by_path.contains_key(&new) {
+                    // Target exists: merge (keep existing, drop old)
+                } else {
+                    // Derive new name from the last path segment
+                    let new_name = new.rsplit('/').next().unwrap_or(&new).to_string();
+                    group.name = new_name;
+                    group.path = new.clone();
+                    self.groups_by_path.insert(new.clone(), group);
+                }
+            }
+
+            // Update insertion_order: replace old with new, or remove if merged
+            if let Some(pos) = self.insertion_order.iter().position(|p| p == old) {
+                if self.insertion_order.contains(&new) {
+                    // Target already in order list (merge case)
+                    self.insertion_order.remove(pos);
+                } else {
+                    self.insertion_order[pos] = new;
+                }
+            }
+        }
+
+        // Ensure all parent groups of new_path exist
+        self.ensure_group_exists(new_path);
+
+        self.rebuild_tree();
+    }
 }
 
 /// Item represents either a group or an instance in the flattened tree view
@@ -194,6 +256,8 @@ pub enum Item {
         depth: usize,
         collapsed: bool,
         session_count: usize,
+        /// Which profile this group belongs to (set in all-profiles mode)
+        profile: Option<String>,
     },
     Session {
         id: String,
@@ -245,6 +309,75 @@ fn min_created_at_in_group(path: &str, instances: &[Instance]) -> DateTime<Utc> 
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
+/// Flatten instances from multiple profiles into a single flat list.
+/// Merges all profiles' sessions and groups at depth 0 (no profile headers).
+/// Uses per-profile GroupTrees so collapsed state is isolated per profile.
+pub fn flatten_tree_all_profiles(
+    instances: &[Instance],
+    group_trees: &std::collections::HashMap<String, GroupTree>,
+    sort_order: SortOrder,
+) -> Vec<Item> {
+    let mut items = Vec::new();
+
+    // Collect all ungrouped sessions across all profiles
+    let mut ungrouped: Vec<&Instance> = instances
+        .iter()
+        .filter(|i| i.group_path.is_empty())
+        .collect();
+
+    match sort_order {
+        SortOrder::Oldest => ungrouped.sort_by_key(|i| i.created_at),
+        SortOrder::Newest => ungrouped.sort_by_key(|i| Reverse(i.created_at)),
+        _ => sort_by_name(&mut ungrouped, sort_order, |i| &i.title),
+    }
+
+    for inst in ungrouped {
+        items.push(Item::Session {
+            id: inst.id.clone(),
+            depth: 0,
+        });
+    }
+
+    // Collect and flatten groups from all profiles at depth 0
+    let mut all_roots: Vec<(&str, &Group, Vec<Instance>)> = Vec::new();
+    for (profile_name, tree) in group_trees {
+        let profile_instances: Vec<Instance> = instances
+            .iter()
+            .filter(|i| i.source_profile == *profile_name)
+            .cloned()
+            .collect();
+        for root in tree.get_roots() {
+            all_roots.push((profile_name, root, profile_instances.clone()));
+        }
+    }
+
+    match sort_order {
+        SortOrder::Oldest => {
+            all_roots.sort_by_key(|(_, g, insts)| min_created_at_in_group(&g.path, insts));
+        }
+        SortOrder::Newest => {
+            all_roots.sort_by_key(|(_, g, insts)| Reverse(max_created_at_in_group(&g.path, insts)));
+        }
+        _ => all_roots.sort_by_key(|(_, g, _)| g.name.to_lowercase()),
+    }
+    if matches!(sort_order, SortOrder::ZA) {
+        all_roots.reverse();
+    }
+
+    for (profile_name, root, profile_instances) in &all_roots {
+        flatten_group(
+            root,
+            profile_instances,
+            &mut items,
+            0,
+            sort_order,
+            Some(profile_name),
+        );
+    }
+
+    items
+}
+
 pub fn flatten_tree(
     group_tree: &GroupTree,
     instances: &[Instance],
@@ -285,7 +418,7 @@ pub fn flatten_tree(
     }
 
     for root in roots_to_iterate {
-        flatten_group(root, instances, &mut items, 0, sort_order);
+        flatten_group(root, instances, &mut items, 0, sort_order, None);
     }
 
     items
@@ -297,6 +430,7 @@ fn flatten_group(
     items: &mut Vec<Item>,
     depth: usize,
     sort_order: SortOrder,
+    profile: Option<&str>,
 ) {
     let session_count = count_sessions_in_group(&group.path, instances);
 
@@ -306,6 +440,7 @@ fn flatten_group(
         depth,
         collapsed: group.collapsed,
         session_count,
+        profile: profile.map(|s| s.to_string()),
     });
 
     if group.collapsed {
@@ -345,7 +480,7 @@ fn flatten_group(
     }
 
     for child in children_to_iterate {
-        flatten_group(child, instances, items, depth + 1, sort_order);
+        flatten_group(child, instances, items, depth + 1, sort_order, profile);
     }
 }
 
@@ -941,5 +1076,78 @@ mod tests {
             .map(|g| g.name.as_str().to_string())
             .collect();
         assert_eq!(all_groups, vec!["gamma".to_string(), "alpha".to_string()]);
+    }
+
+    #[test]
+    fn test_rename_group_simple() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "projects");
+
+        assert!(!tree.group_exists("work"));
+        assert!(tree.group_exists("projects"));
+        assert_eq!(
+            tree.groups_by_path.get("projects").unwrap().name,
+            "projects"
+        );
+    }
+
+    #[test]
+    fn test_rename_group_with_children() {
+        let mut inst1 = Instance::new("test1", "/tmp/1");
+        inst1.group_path = "work".to_string();
+        let mut inst2 = Instance::new("test2", "/tmp/2");
+        inst2.group_path = "work/frontend".to_string();
+        let instances = vec![inst1, inst2];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "projects");
+
+        assert!(!tree.group_exists("work"));
+        assert!(!tree.group_exists("work/frontend"));
+        assert!(tree.group_exists("projects"));
+        assert!(tree.group_exists("projects/frontend"));
+    }
+
+    #[test]
+    fn test_rename_group_merge_into_existing() {
+        let mut inst1 = Instance::new("test1", "/tmp/1");
+        inst1.group_path = "old".to_string();
+        let mut inst2 = Instance::new("test2", "/tmp/2");
+        inst2.group_path = "existing".to_string();
+        let instances = vec![inst1, inst2];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("old", "existing");
+
+        assert!(!tree.group_exists("old"));
+        assert!(tree.group_exists("existing"));
+    }
+
+    #[test]
+    fn test_rename_group_noop_same_path() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "work");
+
+        assert!(tree.group_exists("work"));
+    }
+
+    #[test]
+    fn test_rename_group_noop_empty_target() {
+        let mut inst = Instance::new("test", "/tmp/t");
+        inst.group_path = "work".to_string();
+        let instances = vec![inst];
+        let mut tree = GroupTree::new_with_groups(&instances, &[]);
+
+        tree.rename_group("work", "");
+
+        assert!(tree.group_exists("work"));
     }
 }

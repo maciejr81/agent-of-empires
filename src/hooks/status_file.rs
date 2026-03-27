@@ -1,6 +1,6 @@
-//! Status file I/O for Claude Code hooks-based status detection.
+//! Status file I/O for hooks-based agent status detection.
 //!
-//! Claude Code hooks write `running`, `waiting`, or `idle` to a well-known
+//! Agent hooks write `running`, `waiting`, or `idle` to a well-known
 //! file path so AoE can detect agent status without parsing tmux pane content.
 
 use std::path::PathBuf;
@@ -16,9 +16,10 @@ pub fn hook_status_dir(instance_id: &str) -> PathBuf {
 
 /// Read the hook-written status file for the given instance.
 ///
-/// Returns `None` if the file doesn't exist. Callers are responsible for
-/// detecting crashed/abandoned sessions via process liveness checks
-/// (e.g. `is_pane_dead()`, `is_pane_running_shell()`).
+/// Returns `None` if the file doesn't exist. When `Some`, the hook is
+/// actively tracking the session and shell detection is unreliable
+/// (wrapper scripts may keep a shell alive). Callers should still use
+/// `is_pane_dead()` to detect truly dead panes.
 pub fn read_hook_status(instance_id: &str) -> Option<Status> {
     let status_path = hook_status_dir(instance_id).join("status");
 

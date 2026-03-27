@@ -35,18 +35,18 @@ All settings below can also be edited from the TUI settings screen (press `s` or
 | Variable | Description |
 |----------|-------------|
 | `AGENT_OF_EMPIRES_PROFILE` | Default profile to use |
-| `AGENT_OF_EMPIRES_DEBUG` | Enable debug logging (`1` to enable) |
+| `AGENT_OF_EMPIRES_DEBUG` | Enable debug logging to `debug.log` in app data dir (`1` to enable) |
 
 ## Theme
 
 ```toml
 [theme]
-name = "phosphor"   # phosphor, tokyo-night-storm, catppuccin-latte, dracula
+name = "empire"   # empire, phosphor, tokyo-night-storm, catppuccin-latte, dracula
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `name` | `"phosphor"` | TUI color theme. Available: `phosphor` (default green), `tokyo-night-storm` (dark blue/purple), `catppuccin-latte` (light pastel), `dracula` (dark purple/pink). |
+| `name` | `"empire"` | TUI color theme. Available: `empire` (warm navy/amber), `phosphor` (green), `tokyo-night-storm` (dark blue/purple), `catppuccin-latte` (light pastel), `dracula` (dark purple/pink). |
 
 ## Session
 

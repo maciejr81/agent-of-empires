@@ -4,6 +4,7 @@ use ratatui::style::Color;
 use tracing::warn;
 
 pub const AVAILABLE_THEMES: &[&str] = &[
+    "empire",
     "phosphor",
     "tokyo-night-storm",
     "catppuccin-latte",
@@ -12,13 +13,14 @@ pub const AVAILABLE_THEMES: &[&str] = &[
 
 pub fn load_theme(name: &str) -> Theme {
     match name {
+        "empire" => Theme::empire(),
         "phosphor" => Theme::phosphor(),
         "tokyo-night-storm" => Theme::tokyo_night_storm(),
         "catppuccin-latte" => Theme::catppuccin_latte(),
         "dracula" => Theme::dracula(),
         _ => {
-            warn!("Unknown theme '{}', falling back to phosphor", name);
-            Theme::phosphor()
+            warn!("Unknown theme '{}', falling back to empire", name);
+            Theme::empire()
         }
     }
 }
@@ -49,7 +51,6 @@ pub struct Theme {
     pub group: Color,
     pub search: Color,
     pub accent: Color,
-    pub user_active: Color,
 
     pub diff_add: Color,
     pub diff_delete: Color,
@@ -61,17 +62,54 @@ pub struct Theme {
 
     pub branch: Color,
     pub sandbox: Color,
-    pub worktree_managed: Color,
-    pub worktree_manual: Color,
+    pub user_active: Color,
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::phosphor()
+        Self::empire()
     }
 }
 
 impl Theme {
+    /// Empire theme -- warm amber/copper on navy, aligned with DESIGN.md
+    pub fn empire() -> Self {
+        Self {
+            background: Color::Rgb(15, 23, 42),
+            border: Color::Rgb(51, 65, 85),
+            terminal_border: Color::Rgb(13, 148, 136),
+            selection: Color::Rgb(38, 50, 75),
+            session_selection: Color::Rgb(55, 65, 92),
+
+            title: Color::Rgb(251, 191, 36),
+            text: Color::Rgb(203, 213, 225),
+            dimmed: Color::Rgb(100, 116, 139),
+            hint: Color::Rgb(148, 163, 184),
+
+            running: Color::Rgb(34, 197, 94),
+            waiting: Color::Rgb(251, 191, 36),
+            idle: Color::Rgb(100, 116, 139),
+            error: Color::Rgb(239, 68, 68),
+            terminal_active: Color::Rgb(13, 148, 136),
+
+            group: Color::Rgb(203, 213, 225),
+            search: Color::Rgb(251, 191, 36),
+            accent: Color::Rgb(217, 119, 6),
+
+            diff_add: Color::Rgb(34, 197, 94),
+            diff_delete: Color::Rgb(239, 68, 68),
+            diff_modified: Color::Rgb(251, 191, 36),
+            diff_context: Color::Rgb(100, 116, 139),
+            diff_header: Color::Rgb(13, 148, 136),
+
+            help_key: Color::Rgb(217, 119, 6),
+
+            branch: Color::Rgb(13, 148, 136),
+            sandbox: Color::Rgb(148, 163, 184),
+            user_active: Color::Rgb(148, 163, 184),
+        }
+    }
+
     pub fn phosphor() -> Self {
         Self {
             background: Color::Rgb(16, 20, 18),
@@ -94,7 +132,6 @@ impl Theme {
             group: Color::Rgb(100, 220, 160),
             search: Color::Rgb(180, 255, 200),
             accent: Color::Rgb(57, 255, 20),
-            user_active: Color::Rgb(255, 215, 0), // Gold
 
             diff_add: Color::Rgb(0, 255, 180),
             diff_delete: Color::Rgb(255, 100, 80),
@@ -106,8 +143,7 @@ impl Theme {
 
             branch: Color::Rgb(100, 160, 200),
             sandbox: Color::Rgb(200, 122, 255),
-            worktree_managed: Color::Rgb(100, 220, 160),
-            worktree_manual: Color::Rgb(255, 180, 60),
+            user_active: Color::Rgb(140, 160, 120),
         }
     }
 
@@ -133,7 +169,6 @@ impl Theme {
             group: Color::Rgb(125, 207, 255),
             search: Color::Rgb(187, 154, 247),
             accent: Color::Rgb(122, 162, 247),
-            user_active: Color::Rgb(255, 215, 0), // Gold
 
             diff_add: Color::Rgb(158, 206, 106),
             diff_delete: Color::Rgb(247, 118, 142),
@@ -145,8 +180,7 @@ impl Theme {
 
             branch: Color::Rgb(125, 207, 255),
             sandbox: Color::Rgb(187, 154, 247),
-            worktree_managed: Color::Rgb(158, 206, 106),
-            worktree_manual: Color::Rgb(224, 175, 104),
+            user_active: Color::Rgb(160, 155, 130),
         }
     }
 
@@ -172,7 +206,6 @@ impl Theme {
             group: Color::Rgb(23, 146, 153),
             search: Color::Rgb(114, 135, 253),
             accent: Color::Rgb(254, 100, 11),
-            user_active: Color::Rgb(223, 142, 29), // Orange for light theme
 
             diff_add: Color::Rgb(64, 160, 43),
             diff_delete: Color::Rgb(210, 15, 57),
@@ -184,8 +217,7 @@ impl Theme {
 
             branch: Color::Rgb(4, 165, 229),
             sandbox: Color::Rgb(136, 57, 239),
-            worktree_managed: Color::Rgb(64, 160, 43),
-            worktree_manual: Color::Rgb(223, 142, 29),
+            user_active: Color::Rgb(140, 130, 110),
         }
     }
 
@@ -224,9 +256,7 @@ impl Theme {
 
             branch: Color::Rgb(139, 233, 253),
             sandbox: Color::Rgb(189, 147, 249),
-            worktree_managed: Color::Rgb(80, 250, 123),
-            worktree_manual: Color::Rgb(255, 184, 108),
-            user_active: Color::Rgb(241, 250, 140), // Yellow for Dracula
+            user_active: Color::Rgb(150, 155, 140),
         }
     }
 }
@@ -250,10 +280,17 @@ mod tests {
     }
 
     #[test]
+    fn test_load_empire() {
+        let theme = load_theme("empire");
+        assert_eq!(theme.title, Color::Rgb(251, 191, 36));
+        assert_eq!(theme.background, Color::Rgb(15, 23, 42));
+    }
+
+    #[test]
     fn test_load_invalid_fallback() {
         let theme = load_theme("nonexistent-theme");
-        assert_eq!(theme.title, Color::Rgb(57, 255, 20));
-        assert_eq!(theme.background, Color::Rgb(16, 20, 18));
+        assert_eq!(theme.title, Color::Rgb(251, 191, 36));
+        assert_eq!(theme.background, Color::Rgb(15, 23, 42));
     }
 
     #[test]
@@ -272,7 +309,8 @@ mod tests {
 
     #[test]
     fn test_available_themes_count() {
-        assert_eq!(AVAILABLE_THEMES.len(), 4);
+        assert_eq!(AVAILABLE_THEMES.len(), 5);
+        assert!(AVAILABLE_THEMES.contains(&"empire"));
         assert!(AVAILABLE_THEMES.contains(&"phosphor"));
         assert!(AVAILABLE_THEMES.contains(&"tokyo-night-storm"));
         assert!(AVAILABLE_THEMES.contains(&"catppuccin-latte"));

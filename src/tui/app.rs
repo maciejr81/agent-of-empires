@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::home::{HomeView, TerminalMode};
 use super::styles::load_theme;
 use super::styles::Theme;
-use crate::session::{get_update_settings, load_config, save_config, Storage};
+use crate::session::{get_update_settings, load_config, save_config};
 use crate::tmux::AvailableTools;
 use crate::update::{check_for_update, UpdateInfo};
 
@@ -77,15 +77,19 @@ pub fn check_version_change() -> Result<Option<String>> {
 
 impl App {
     pub fn new(profile: &str, available_tools: AvailableTools) -> Result<Self> {
-        let storage = Storage::new(profile)?;
-        let mut home = HomeView::new(storage, available_tools)?;
+        let active_profile = if profile.is_empty() {
+            None // all-profiles mode
+        } else {
+            Some(profile.to_string())
+        };
+        let mut home = HomeView::new(active_profile, available_tools)?;
 
         // Check if we need to show welcome or changelog dialogs
         let mut config = load_config()?.unwrap_or_default();
 
-        // Load theme from config, defaulting to phosphor if empty
+        // Load theme from config, defaulting to empire if empty
         let theme_name = if config.theme.name.is_empty() {
-            "phosphor"
+            "empire"
         } else {
             &config.theme.name
         };
@@ -112,6 +116,10 @@ impl App {
             update_info: None,
             update_rx: None,
         })
+    }
+
+    pub fn show_startup_warning(&mut self, message: &str) {
+        self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new("Warning", message));
     }
 
     pub fn set_theme(&mut self, name: &str) {
@@ -293,7 +301,11 @@ impl App {
     ) -> Result<()> {
         // Global keybindings
         match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+                return Ok(());
+            }
+            (KeyCode::Char('q'), _) => {
                 if !self.home.has_dialog() {
                     self.should_quit = true;
                     return Ok(());
@@ -333,11 +345,6 @@ impl App {
             }
             Action::AttachTerminal(id, mode) => {
                 self.attach_terminal(&id, mode, terminal)?;
-            }
-            Action::SwitchProfile(profile) => {
-                let storage = Storage::new(&profile)?;
-                let tools = self.home.available_tools();
-                self.home = HomeView::new(storage, tools)?;
             }
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;
@@ -387,10 +394,19 @@ impl App {
 
         let tmux_session = instance.tmux_session()?;
 
-        if !tmux_session.exists()
-            || tmux_session.is_pane_dead()
-            || (!instance.expects_shell() && tmux_session.is_pane_running_shell())
-        {
+        // Decide whether to restart: if hook status is available, trust it over
+        // shell detection. Wrapper scripts (Devbox, version managers) run agents
+        // via a shell process, so is_pane_running_shell() returns true even when
+        // the agent is healthy. This mirrors the fix in instance.rs status detection.
+        let needs_restart = if !tmux_session.exists() || tmux_session.is_pane_dead() {
+            true
+        } else if crate::hooks::read_hook_status(&instance.id).is_some() {
+            // Hook status is tracking this session; shell detection is unreliable
+            false
+        } else {
+            !instance.expects_shell() && tmux_session.is_pane_running_shell()
+        };
+        if needs_restart {
             if tmux_session.exists() {
                 let _ = tmux_session.kill();
             }
@@ -403,8 +419,8 @@ impl App {
                     .is_some_and(|i| !i.is_empty());
 
                 if has_instruction
-                    && !crate::agents::get_agent(&instance.tool)
-                        .is_some_and(|a| a.instruction_flag.is_some())
+                    && crate::agents::get_agent(&instance.tool)
+                        .is_none_or(|a| a.instruction_flag.is_none())
                 {
                     let config = load_config()?.unwrap_or_default();
                     if !config.app_state.has_seen_custom_instruction_warning {
@@ -592,7 +608,6 @@ pub enum Action {
     Quit,
     AttachSession(String),
     AttachTerminal(String, TerminalMode),
-    SwitchProfile(String),
     EditFile(PathBuf),
     StopSession(String),
     SetTheme(String),

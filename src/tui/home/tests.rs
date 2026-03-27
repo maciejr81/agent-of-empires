@@ -29,9 +29,9 @@ struct TestEnv {
 fn create_test_env_empty() -> TestEnv {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let _storage = Storage::new("test").unwrap(); // ensure profile dir exists
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(Some("test".to_string()), tools).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -49,7 +49,7 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
     storage.save(&instances).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(Some("test".to_string()), tools).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -73,7 +73,7 @@ fn create_test_env_with_groups() -> TestEnv {
     storage.save(&instances).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(Some("test".to_string()), tools).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -104,7 +104,7 @@ fn create_test_env_with_mixed_sessions() -> TestEnv {
     storage.save_with_groups(&instances, &group_tree).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(Some("test".to_string()), tools).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -452,7 +452,7 @@ fn test_search_matches_session_title() {
     // The best match should be session2
     let best_idx = env.view.search_matches[0];
     if let Item::Session { id, .. } = &env.view.flat_items[best_idx] {
-        let inst = env.view.instance_map.get(id).unwrap();
+        let inst = env.view.get_instance(id).unwrap();
         assert!(inst.title.contains("session2"));
     }
 }
@@ -669,14 +669,15 @@ fn test_r_opens_rename_dialog() {
 
 #[test]
 #[serial]
-fn test_rename_dialog_not_opened_on_group() {
+fn test_rename_dialog_opened_on_group() {
     let mut env = create_test_env_with_groups();
     env.view.cursor = 1;
     env.view.update_selected();
     assert!(env.view.selected_group.is_some());
     assert!(env.view.rename_dialog.is_none());
     env.view.handle_key(key(KeyCode::Char('r')));
-    assert!(env.view.rename_dialog.is_none());
+    assert!(env.view.rename_dialog.is_some());
+    assert!(env.view.group_rename_context.is_some());
 }
 
 #[test]
@@ -693,7 +694,7 @@ fn test_has_dialog_returns_true_for_rename_dialog() {
 #[serial]
 fn test_select_session_by_id() {
     let mut env = create_test_env_with_sessions(3);
-    let session_id = env.view.instances[1].id.clone();
+    let session_id = env.view.instances()[1].id.clone();
 
     assert_eq!(env.view.cursor, 0);
 
@@ -763,18 +764,24 @@ fn test_uppercase_p_picker_switch_profile() {
     crate::session::create_profile("first").unwrap();
     crate::session::create_profile("second").unwrap();
 
-    let storage = Storage::new("first").unwrap();
+    let _storage = Storage::new("first").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
-    let mut view = HomeView::new(storage, tools).unwrap();
+    let mut view = HomeView::new(Some("first".to_string()), tools).unwrap();
 
     // Open picker
     view.handle_key(key(KeyCode::Char('P')));
     assert!(view.profile_picker_dialog.is_some());
 
-    // Navigate down to "second" and select
+    // In filtered mode, "all" is at top, then "first", "second", "test"
+    // Navigate down to reach "second" and select it
+    view.handle_key(key(KeyCode::Down));
+    view.handle_key(key(KeyCode::Down));
     view.handle_key(key(KeyCode::Down));
     let action = view.handle_key(key(KeyCode::Enter));
-    assert_eq!(action, Some(Action::SwitchProfile("second".to_string())));
+    // Profile switch is handled internally, no Action returned
+    assert_eq!(action, None);
+    assert_eq!(view.active_profile, Some("second".to_string()));
+    assert!(view.profile_picker_dialog.is_none());
 }
 
 #[test]
@@ -809,6 +816,46 @@ fn test_enter_returns_attach_terminal_in_terminal_view() {
     // In Terminal view, Enter returns AttachTerminal
     let action = view.handle_key(key(KeyCode::Enter));
     assert!(matches!(action, Some(Action::AttachTerminal(_, _))));
+}
+
+#[test]
+#[serial]
+fn test_shift_t_attaches_terminal_from_agent_view() {
+    let env = create_test_env_with_sessions(1);
+    let mut view = env.view;
+
+    // Should be in Agent view by default
+    assert_eq!(view.view_mode, ViewMode::Agent);
+
+    // Shift+T should return AttachTerminal without switching view mode
+    let action = view.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(action, Some(Action::AttachTerminal(_, _))));
+    assert_eq!(view.view_mode, ViewMode::Agent);
+}
+
+#[test]
+#[serial]
+fn test_shift_t_attaches_terminal_from_terminal_view() {
+    let env = create_test_env_with_sessions(1);
+    let mut view = env.view;
+
+    // Switch to Terminal view
+    view.handle_key(key(KeyCode::Char('t')));
+    assert_eq!(view.view_mode, ViewMode::Terminal);
+
+    // Shift+T should also work from Terminal view
+    let action = view.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(action, Some(Action::AttachTerminal(_, _))));
+}
+
+#[test]
+#[serial]
+fn test_shift_t_noop_with_no_sessions() {
+    let env = create_test_env_empty();
+    let mut view = env.view;
+
+    let action = view.handle_key(key(KeyCode::Char('T')));
+    assert!(action.is_none());
 }
 
 #[test]
@@ -905,7 +952,7 @@ fn create_test_env_with_group_sessions() -> TestEnv {
     storage.save_with_groups(&instances, &group_tree).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(Some("test".to_string()), tools).unwrap();
     TestEnv { _temp: temp, view }
 }
 
@@ -926,7 +973,6 @@ fn test_group_has_managed_worktrees() {
         main_repo_path: "/tmp/main".to_string(),
         managed_by_aoe: true,
         created_at: Utc::now(),
-        cleanup_on_delete: true,
     });
 
     let mut inst2 = Instance::new("other-session", "/tmp/other");
@@ -935,7 +981,7 @@ fn test_group_has_managed_worktrees() {
     storage.save(&[inst1, inst2]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(Some("test".to_string()), tools).unwrap();
 
     assert!(view.group_has_managed_worktrees("work", "work/"));
     assert!(!view.group_has_managed_worktrees("other", "other/"));
@@ -968,7 +1014,7 @@ fn test_group_has_containers() {
     storage.save(&[inst1, inst2]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let view = HomeView::new(storage, tools).unwrap();
+    let view = HomeView::new(Some("test".to_string()), tools).unwrap();
 
     assert!(view.group_has_containers("work", "work/"));
     assert!(!view.group_has_containers("other", "other/"));
@@ -991,16 +1037,27 @@ fn test_delete_selected_group_updates_groups_field() {
     }
 
     assert!(env.view.selected_group.is_some());
-    assert!(env.view.group_tree.group_exists("work"));
+    assert!(env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
 
     // Delete the group (this moves sessions to default)
     env.view.delete_selected_group().unwrap();
 
     // Verify the group is removed from group_tree
-    assert!(!env.view.group_tree.group_exists("work"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
 
     // Verify self.groups is updated (this is the bug fix)
-    let group_paths: Vec<_> = env.view.groups.iter().map(|g| g.path.as_str()).collect();
+    let all_groups = env.view.all_groups();
+    let group_paths: Vec<_> = all_groups.iter().map(|g| g.path.as_str()).collect();
     assert!(!group_paths.contains(&"work"));
     assert!(!group_paths.contains(&"work/projects"));
 }
@@ -1025,7 +1082,7 @@ fn test_delete_group_with_sessions_updates_groups_field() {
     }
 
     assert!(env.view.selected_group.is_some());
-    let initial_instance_count = env.view.instances.len();
+    let initial_instance_count = env.view.instances().len();
 
     // Delete the group with all sessions
     let options = GroupDeleteOptions {
@@ -1038,18 +1095,29 @@ fn test_delete_group_with_sessions_updates_groups_field() {
     env.view.delete_group_with_sessions(&options).unwrap();
 
     // Verify the group is removed from group_tree
-    assert!(!env.view.group_tree.group_exists("work"));
-    assert!(!env.view.group_tree.group_exists("work/projects"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work/projects"));
 
     // Verify self.groups is updated (this is the bug fix)
-    let group_paths: Vec<_> = env.view.groups.iter().map(|g| g.path.as_str()).collect();
+    let all_groups = env.view.all_groups();
+    let group_paths: Vec<_> = all_groups.iter().map(|g| g.path.as_str()).collect();
     assert!(!group_paths.contains(&"work"));
     assert!(!group_paths.contains(&"work/projects"));
 
     // Verify sessions are marked as deleting
     let deleting_count = env
         .view
-        .instances
+        .instances()
         .iter()
         .filter(|i| i.status == Status::Deleting)
         .count();
@@ -1057,7 +1125,7 @@ fn test_delete_group_with_sessions_updates_groups_field() {
     assert_eq!(deleting_count, 3);
 
     // Instance count should remain the same (they're marked as deleting, not removed yet)
-    assert_eq!(env.view.instances.len(), initial_instance_count);
+    assert_eq!(env.view.instances().len(), initial_instance_count);
 }
 
 #[test]
@@ -1078,13 +1146,12 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
         main_repo_path: "/tmp/main".to_string(),
         managed_by_aoe: true,
         created_at: Utc::now(),
-        cleanup_on_delete: true,
     });
 
     storage.save(&[inst1]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let mut view = HomeView::new(storage, tools).unwrap();
+    let mut view = HomeView::new(Some("test".to_string()), tools).unwrap();
 
     // Select the work group
     view.cursor = 0;
@@ -1103,7 +1170,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
 
     // We can't easily verify the deletion request was sent with the right flags
     // without mocking, but we can verify the group was deleted
-    assert!(!view.group_tree.group_exists("work"));
+    assert!(!view.group_trees.get("test").unwrap().group_exists("work"));
 }
 
 #[test]
@@ -1131,7 +1198,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
     storage.save(&[inst1]).unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
-    let mut view = HomeView::new(storage, tools).unwrap();
+    let mut view = HomeView::new(Some("test".to_string()), tools).unwrap();
 
     // Select the work group
     view.cursor = 0;
@@ -1149,7 +1216,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
     view.delete_group_with_sessions(&options).unwrap();
 
     // Verify the group was deleted
-    assert!(!view.group_tree.group_exists("work"));
+    assert!(!view.group_trees.get("test").unwrap().group_exists("work"));
 }
 
 #[test]
@@ -1171,7 +1238,12 @@ fn test_delete_group_includes_nested_groups() {
     }
 
     // Verify nested group exists
-    assert!(env.view.group_tree.group_exists("work/projects"));
+    assert!(env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work/projects"));
 
     // Delete the group with all sessions
     let options = GroupDeleteOptions {
@@ -1184,8 +1256,18 @@ fn test_delete_group_includes_nested_groups() {
     env.view.delete_group_with_sessions(&options).unwrap();
 
     // Verify both parent and nested groups are removed
-    assert!(!env.view.group_tree.group_exists("work"));
-    assert!(!env.view.group_tree.group_exists("work/projects"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work/projects"));
 }
 
 #[test]
@@ -1194,7 +1276,7 @@ fn test_groups_field_stays_in_sync_with_storage() {
     let mut env = create_test_env_with_group_sessions();
 
     // Get initial group count
-    let initial_group_count = env.view.groups.len();
+    let initial_group_count = env.view.all_groups().len();
     assert!(initial_group_count > 0);
 
     // Select and delete the work group
@@ -1211,14 +1293,21 @@ fn test_groups_field_stays_in_sync_with_storage() {
     env.view.delete_selected_group().unwrap();
 
     // After deletion, groups field should be smaller
-    assert!(env.view.groups.len() < initial_group_count);
+    assert!(env.view.all_groups().len() < initial_group_count);
 
     // Reload from storage and verify groups match
     env.view.reload().unwrap();
-    let reloaded_groups: Vec<_> = env.view.groups.iter().map(|g| g.path.clone()).collect();
+    let reloaded_groups: Vec<_> = env
+        .view
+        .all_groups()
+        .iter()
+        .map(|g| g.path.clone())
+        .collect();
     let tree_groups: Vec<_> = env
         .view
-        .group_tree
+        .group_trees
+        .get("test")
+        .unwrap()
         .get_all_groups()
         .iter()
         .map(|g| g.path.clone())
@@ -1303,8 +1392,14 @@ fn test_group_collapsed_state_saved_to_storage() {
     env.view.handle_key(key(KeyCode::Enter));
 
     // Load fresh from storage to verify persistence
-    let (_, groups) = env.view.storage.load_with_groups().unwrap();
-    let fresh_tree = GroupTree::new_with_groups(&env.view.instances, &groups);
+    let (_, groups) = env
+        .view
+        .storages
+        .get("test")
+        .unwrap()
+        .load_with_groups()
+        .unwrap();
+    let fresh_tree = GroupTree::new_with_groups(env.view.instances(), &groups);
     let all_groups = fresh_tree.get_all_groups();
 
     let saved_group = all_groups
@@ -1459,7 +1554,7 @@ fn test_o_key_flat_items_sorted_az() {
             }
             Item::Session { id, .. } => {
                 if in_work_group {
-                    if let Some(inst) = env.view.instance_map.get(id) {
+                    if let Some(inst) = env.view.get_instance(id) {
                         session_titles.push(inst.title.as_str());
                     }
                 }
@@ -1492,7 +1587,7 @@ fn test_o_key_flat_items_sorted_za() {
             }
             Item::Session { id, .. } => {
                 if in_work_group {
-                    if let Some(inst) = env.view.instance_map.get(id) {
+                    if let Some(inst) = env.view.get_instance(id) {
                         session_titles.push(inst.title.as_str());
                     }
                 }
@@ -1526,7 +1621,7 @@ fn test_o_key_flat_items_newest_preserves_insertion_order() {
             }
             Item::Session { id, .. } => {
                 if in_work_group {
-                    if let Some(inst) = env.view.instance_map.get(id) {
+                    if let Some(inst) = env.view.get_instance(id) {
                         session_titles.push(inst.title.as_str());
                     }
                 }
@@ -1561,4 +1656,591 @@ fn test_o_key_clamps_cursor_when_list_shrinks() {
 
     let valid_max = env.view.flat_items.len().saturating_sub(1);
     assert!(env.view.cursor <= valid_max);
+}
+
+#[test]
+#[serial]
+fn test_all_profiles_view_loads_from_multiple_profiles() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    let storage_a = Storage::new("alpha").unwrap();
+    storage_a
+        .save(&[Instance::new("Alpha Session", "/tmp/a")])
+        .unwrap();
+
+    let storage_b = Storage::new("beta").unwrap();
+    storage_b
+        .save(&[Instance::new("Beta Session", "/tmp/b")])
+        .unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let view = HomeView::new(None, tools).unwrap();
+
+    assert_eq!(view.instances().len(), 2);
+    let profiles: Vec<&str> = view
+        .instances()
+        .iter()
+        .map(|i| i.source_profile.as_str())
+        .collect();
+    assert!(profiles.contains(&"alpha"));
+    assert!(profiles.contains(&"beta"));
+}
+
+#[test]
+#[serial]
+fn test_filtered_view_loads_single_profile() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    let storage_a = Storage::new("alpha").unwrap();
+    storage_a
+        .save(&[Instance::new("Alpha Session", "/tmp/a")])
+        .unwrap();
+
+    let storage_b = Storage::new("beta").unwrap();
+    storage_b
+        .save(&[Instance::new("Beta Session", "/tmp/b")])
+        .unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let view = HomeView::new(Some("alpha".to_string()), tools).unwrap();
+
+    assert_eq!(view.instances().len(), 1);
+    assert_eq!(view.instances()[0].title, "Alpha Session");
+    assert_eq!(view.instances()[0].source_profile, "alpha");
+}
+
+#[test]
+#[serial]
+fn test_all_profiles_view_has_no_profile_headers() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    let storage_a = Storage::new("alpha").unwrap();
+    storage_a.save(&[Instance::new("A1", "/tmp/a")]).unwrap();
+
+    let storage_b = Storage::new("beta").unwrap();
+    storage_b.save(&[Instance::new("B1", "/tmp/b")]).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let view = HomeView::new(None, tools).unwrap();
+
+    // All items should be sessions (no profile headers)
+    let session_count = view
+        .flat_items
+        .iter()
+        .filter(|i| matches!(i, Item::Session { .. }))
+        .count();
+    assert_eq!(session_count, 2);
+    assert_eq!(view.flat_items.len(), 2);
+}
+
+#[test]
+#[serial]
+fn test_all_profiles_view_shows_all_sessions_flat() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    let storage_a = Storage::new("alpha").unwrap();
+    storage_a.save(&[Instance::new("A1", "/tmp/a")]).unwrap();
+
+    let storage_b = Storage::new("beta").unwrap();
+    storage_b.save(&[Instance::new("B1", "/tmp/b")]).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let view = HomeView::new(None, tools).unwrap();
+
+    // All sessions from all profiles should be visible at depth 0
+    for item in &view.flat_items {
+        if let Item::Session { depth, .. } = item {
+            assert_eq!(*depth, 0, "sessions in all view should be at depth 0");
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn test_create_session_in_all_mode_is_findable() {
+    use crate::tui::dialogs::NewSessionData;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    // Create a profile so "all" mode has something
+    let storage = Storage::new("alpha").unwrap();
+    storage
+        .save(&[Instance::new("Existing", "/tmp/a")])
+        .unwrap();
+
+    let project_dir = temp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(None, tools).unwrap();
+
+    let data = NewSessionData {
+        profile: "alpha".to_string(),
+        title: "New Session".to_string(),
+        path: project_dir.to_str().unwrap().to_string(),
+        group: String::new(),
+        tool: "claude".to_string(),
+        worktree_branch: None,
+        create_new_branch: false,
+        extra_repo_paths: Vec::new(),
+        sandbox: false,
+        sandbox_image: String::new(),
+        yolo_mode: false,
+        extra_env: Vec::new(),
+        extra_args: String::new(),
+        command_override: String::new(),
+    };
+
+    let session_id = view.create_session(data).unwrap();
+
+    // In unified view, the session IS findable (fixes #419)
+    assert!(
+        view.get_instance(&session_id).is_some(),
+        "session created in all-mode should be findable by get_instance"
+    );
+    assert_eq!(
+        view.get_instance(&session_id).unwrap().source_profile,
+        "alpha"
+    );
+}
+
+#[test]
+#[serial]
+fn test_save_preserves_per_profile_collapsed_state() {
+    use crate::session::GroupTree;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    // Create alpha with group "work" (collapsed)
+    let storage_a = Storage::new("alpha").unwrap();
+    let mut inst_a = Instance::new("A1", "/tmp/a");
+    inst_a.group_path = "work".to_string();
+    let mut tree_a = GroupTree::new_with_groups(&[inst_a.clone()], &[]);
+    tree_a.toggle_collapsed("work");
+    storage_a.save_with_groups(&[inst_a], &tree_a).unwrap();
+
+    // Create beta with group "work" (expanded, the default)
+    let storage_b = Storage::new("beta").unwrap();
+    let mut inst_b = Instance::new("B1", "/tmp/b");
+    inst_b.group_path = "work".to_string();
+    let tree_b = GroupTree::new_with_groups(&[inst_b.clone()], &[]);
+    storage_b.save_with_groups(&[inst_b], &tree_b).unwrap();
+
+    // Load unified view
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let view = HomeView::new(None, tools).unwrap();
+
+    // Verify per-profile collapsed state is preserved
+    let alpha_tree = view.group_trees.get("alpha").unwrap();
+    let alpha_work = alpha_tree
+        .get_all_groups()
+        .into_iter()
+        .find(|g| g.path == "work")
+        .expect("alpha should have work group");
+    assert!(
+        alpha_work.collapsed,
+        "alpha's 'work' group should be collapsed"
+    );
+
+    let beta_tree = view.group_trees.get("beta").unwrap();
+    let beta_work = beta_tree
+        .get_all_groups()
+        .into_iter()
+        .find(|g| g.path == "work")
+        .expect("beta should have work group");
+    assert!(
+        !beta_work.collapsed,
+        "beta's 'work' group should be expanded"
+    );
+
+    // Save and reload to verify persistence
+    view.save().unwrap();
+
+    // Reload from disk and verify alpha's collapsed state survived
+    let (_, groups_a) = storage_a.load_with_groups().unwrap();
+    let saved_a = groups_a
+        .iter()
+        .find(|g| g.path == "work")
+        .expect("alpha should still have work group on disk");
+    assert!(
+        saved_a.collapsed,
+        "alpha's 'work' collapsed state should persist to disk"
+    );
+
+    let (_, groups_b) = storage_b.load_with_groups().unwrap();
+    let saved_b = groups_b
+        .iter()
+        .find(|g| g.path == "work")
+        .expect("beta should still have work group on disk");
+    assert!(
+        !saved_b.collapsed,
+        "beta's 'work' expanded state should persist to disk"
+    );
+}
+
+#[test]
+#[serial]
+fn test_create_profile_rejects_reserved_name_all() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+    let _storage = Storage::new("default").unwrap();
+
+    let result = crate::session::create_profile("all");
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("reserved"),
+        "error should mention 'reserved'"
+    );
+
+    // Case-insensitive
+    let result = crate::session::create_profile("ALL");
+    assert!(result.is_err());
+}
+
+#[test]
+#[serial]
+fn test_delete_group_scoped_to_owning_profile() {
+    use crate::session::GroupTree;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    // Create alpha with group "work"
+    let storage_a = Storage::new("alpha").unwrap();
+    let mut inst_a = Instance::new("A1", "/tmp/a");
+    inst_a.group_path = "work".to_string();
+    let tree_a = GroupTree::new_with_groups(&[inst_a.clone()], &[]);
+    storage_a.save_with_groups(&[inst_a], &tree_a).unwrap();
+
+    // Create beta with the same group name "work"
+    let storage_b = Storage::new("beta").unwrap();
+    let mut inst_b = Instance::new("B1", "/tmp/b");
+    inst_b.group_path = "work".to_string();
+    let tree_b = GroupTree::new_with_groups(&[inst_b.clone()], &[]);
+    storage_b.save_with_groups(&[inst_b], &tree_b).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(None, tools).unwrap();
+
+    // Both profiles should have a "work" group
+    assert!(view.group_trees.get("alpha").unwrap().group_exists("work"));
+    assert!(view.group_trees.get("beta").unwrap().group_exists("work"));
+
+    // Find a "work" group item that belongs to alpha and select it.
+    // Collect candidate indices first to avoid borrow conflicts.
+    let work_indices: Vec<usize> = view
+        .flat_items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| match item {
+            Item::Group { path, .. } if path == "work" => Some(idx),
+            _ => None,
+        })
+        .collect();
+
+    for idx in work_indices {
+        view.cursor = idx;
+        view.update_selected();
+        if view.selected_group_profile.as_deref() == Some("alpha") {
+            break;
+        }
+    }
+
+    assert_eq!(view.selected_group.as_deref(), Some("work"));
+    assert_eq!(view.selected_group_profile.as_deref(), Some("alpha"));
+
+    // Delete alpha's "work" group
+    view.delete_selected_group().unwrap();
+
+    // Alpha's "work" group should be gone, but beta's should remain
+    assert!(
+        !view.group_trees.get("alpha").unwrap().group_exists("work"),
+        "alpha's 'work' group should be deleted"
+    );
+    assert!(
+        view.group_trees.get("beta").unwrap().group_exists("work"),
+        "beta's 'work' group should be untouched"
+    );
+
+    // Alpha's instance should be ungrouped, beta's should still be in "work"
+    let alpha_inst = view
+        .instances()
+        .iter()
+        .find(|i| i.source_profile == "alpha")
+        .unwrap();
+    assert_eq!(
+        alpha_inst.group_path, "",
+        "alpha's instance should be ungrouped"
+    );
+    let beta_inst = view
+        .instances()
+        .iter()
+        .find(|i| i.source_profile == "beta")
+        .unwrap();
+    assert_eq!(
+        beta_inst.group_path, "work",
+        "beta's instance should still be in 'work'"
+    );
+}
+
+#[test]
+#[serial]
+fn test_shift_n_opens_prefilled_dialog_from_session() {
+    let mut env = create_test_env_with_groups();
+    assert!(env.view.new_dialog.is_none());
+
+    // Move cursor to the "work-project" session (grouped under "work")
+    // flat_items: [Group("personal"), Session("personal-project"), Group("work"), Session("work-project"), Session("ungrouped")]
+    let work_session_idx = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Session { id, .. } if env.view.get_instance(id).map(|i| i.title.as_str()) == Some("work-project")))
+        .expect("work-project session should exist in flat_items");
+    env.view.cursor = work_session_idx;
+    env.view.update_selected();
+
+    env.view.handle_key(key(KeyCode::Char('N')));
+    let dialog = env.view.new_dialog.as_ref().expect("N should open dialog");
+    assert_eq!(dialog.path_value(), "/tmp/work");
+    assert_eq!(dialog.group_value(), "work");
+}
+
+#[test]
+#[serial]
+fn test_shift_n_opens_prefilled_dialog_from_group() {
+    let mut env = create_test_env_with_groups();
+
+    // Move cursor to a group row
+    let group_idx = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "work"))
+        .expect("work group should exist in flat_items");
+    env.view.cursor = group_idx;
+    env.view.update_selected();
+
+    env.view.handle_key(key(KeyCode::Char('N')));
+    let dialog = env.view.new_dialog.as_ref().expect("N should open dialog");
+    assert_eq!(dialog.group_value(), "work");
+}
+
+#[test]
+#[serial]
+fn test_shift_n_does_nothing_with_no_selection() {
+    let mut env = create_test_env_empty();
+    env.view.handle_key(key(KeyCode::Char('N')));
+    assert!(
+        env.view.new_dialog.is_none(),
+        "N should not open dialog when nothing is selected"
+    );
+}
+
+#[test]
+#[serial]
+fn test_shift_n_prefills_main_repo_path_for_worktree_session() {
+    use crate::session::WorktreeInfo;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+    let storage = Storage::new("test").unwrap();
+
+    let mut inst = Instance::new("worktree-session", "/tmp/repo-worktrees/feature-branch");
+    inst.worktree_info = Some(WorktreeInfo {
+        branch: "feature-branch".to_string(),
+        main_repo_path: "/tmp/repo".to_string(),
+        managed_by_aoe: true,
+        created_at: chrono::Utc::now(),
+    });
+    storage.save(&[inst]).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(Some("test".to_string()), tools).unwrap();
+    view.cursor = 0;
+    view.update_selected();
+
+    view.handle_key(key(KeyCode::Char('N')));
+    let dialog = view.new_dialog.as_ref().expect("N should open dialog");
+    assert_eq!(
+        dialog.path_value(),
+        "/tmp/repo",
+        "Should pre-fill main_repo_path, not worktree path"
+    );
+}
+
+#[test]
+#[serial]
+fn test_shift_n_prefills_session_path_for_ungrouped() {
+    let mut env = create_test_env_with_groups();
+
+    // Move cursor to the ungrouped session
+    let ungrouped_idx = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Session { id, .. } if env.view.get_instance(id).map(|i| i.title.as_str()) == Some("ungrouped")))
+        .expect("ungrouped session should exist");
+    env.view.cursor = ungrouped_idx;
+    env.view.update_selected();
+
+    env.view.handle_key(key(KeyCode::Char('N')));
+    let dialog = env.view.new_dialog.as_ref().expect("N should open dialog");
+    assert_eq!(dialog.path_value(), "/tmp/u");
+    assert_eq!(
+        dialog.group_value(),
+        "",
+        "ungrouped session should not pre-fill group"
+    );
+}
+
+#[test]
+fn effective_list_width_clamps_on_small_screens() {
+    // The formula: list_width.min(available.saturating_sub(40)).max(10)
+    let clamp = |list_width: u16, available: u16| -> u16 {
+        list_width.min(available.saturating_sub(40)).max(10)
+    };
+
+    // Normal screen (120 cols): list_width 35 fits fine
+    assert_eq!(clamp(35, 120), 35);
+
+    // Medium screen (80 cols): list_width 35 still fits (80-40=40 > 35)
+    assert_eq!(clamp(35, 80), 35);
+
+    // Small screen (60 cols): list capped to 20, leaving 40 for preview
+    assert_eq!(clamp(35, 60), 20);
+
+    // Very small screen (50 cols): list capped to 10 (minimum)
+    assert_eq!(clamp(35, 50), 10);
+
+    // Tiny screen (30 cols): list stays at minimum 10
+    assert_eq!(clamp(35, 30), 10);
+
+    // User-resized list to 50 on a 100-col screen: capped to 60, but 50 < 60
+    assert_eq!(clamp(50, 100), 50);
+
+    // User-resized list to 50 on a 70-col screen: capped to 30, but min 10
+    assert_eq!(clamp(50, 70), 30);
+}
+
+#[test]
+#[serial]
+fn test_rename_selected_group_path() {
+    let mut env = create_test_env_with_groups();
+
+    // Set up rename context for the "work" group
+    env.view.group_rename_context = Some(super::GroupRenameContext {
+        old_path: "work".to_string(),
+        old_profile: "test".to_string(),
+    });
+
+    // Rename "work" -> "projects"
+    env.view
+        .rename_selected_group(Some("projects"), None)
+        .unwrap();
+
+    // Verify the session's group_path was updated
+    let work_session = env
+        .view
+        .instances()
+        .iter()
+        .find(|i| i.title == "work-project")
+        .unwrap();
+    assert_eq!(work_session.group_path, "projects");
+}
+
+#[test]
+#[serial]
+fn test_rename_selected_group_with_children() {
+    use crate::session::GroupTree;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+    let storage = Storage::new("test").unwrap();
+
+    let mut inst1 = Instance::new("parent-session", "/tmp/p");
+    inst1.group_path = "work".to_string();
+    let mut inst2 = Instance::new("child-session", "/tmp/c");
+    inst2.group_path = "work/frontend".to_string();
+    let instances = vec![inst1, inst2];
+    let group_tree = GroupTree::new_with_groups(&instances, &[]);
+    storage.save_with_groups(&instances, &group_tree).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(Some("test".to_string()), tools).unwrap();
+
+    view.group_rename_context = Some(super::GroupRenameContext {
+        old_path: "work".to_string(),
+        old_profile: "test".to_string(),
+    });
+
+    view.rename_selected_group(Some("projects"), None).unwrap();
+
+    let parent = view
+        .instances()
+        .iter()
+        .find(|i| i.title == "parent-session")
+        .unwrap();
+    assert_eq!(parent.group_path, "projects");
+
+    let child = view
+        .instances()
+        .iter()
+        .find(|i| i.title == "child-session")
+        .unwrap();
+    assert_eq!(child.group_path, "projects/frontend");
+}
+
+#[test]
+#[serial]
+fn test_rename_selected_group_noop_when_unchanged() {
+    let mut env = create_test_env_with_groups();
+
+    env.view.group_rename_context = Some(super::GroupRenameContext {
+        old_path: "work".to_string(),
+        old_profile: "test".to_string(),
+    });
+
+    // Same path, no profile change -> noop
+    env.view.rename_selected_group(Some("work"), None).unwrap();
+
+    let work_session = env
+        .view
+        .instances()
+        .iter()
+        .find(|i| i.title == "work-project")
+        .unwrap();
+    assert_eq!(work_session.group_path, "work");
+}
+
+#[test]
+#[serial]
+fn test_q_in_search_mode_types_q_not_quit() {
+    let env = create_test_env_with_sessions(3);
+    let mut view = env.view;
+
+    view.handle_key(key(KeyCode::Char('/')));
+    assert!(view.search_active);
+
+    let action = view.handle_key(key(KeyCode::Char('q')));
+    assert_eq!(action, None);
+    assert!(view.search_active);
+    assert_eq!(view.search_query.value(), "q");
+}
+
+#[test]
+#[serial]
+fn test_has_dialog_true_when_search_active() {
+    let env = create_test_env_empty();
+    let mut view = env.view;
+
+    assert!(!view.has_dialog());
+    view.handle_key(key(KeyCode::Char('/')));
+    assert!(view.has_dialog());
 }

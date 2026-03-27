@@ -5,8 +5,8 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, List, ListItem, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState,
+        Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState,
     },
     Frame,
 };
@@ -114,10 +114,15 @@ impl DiffView {
 
     fn render_content(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         // Split into file list (left) and diff content (right)
+        // On small screens, cap file list width so the diff pane gets adequate space
+        let effective_file_list_width = self
+            .file_list_width
+            .min(area.width.saturating_sub(40))
+            .max(5);
         let layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(self.file_list_width),
+                Constraint::Length(effective_file_list_width),
                 Constraint::Min(40),
             ])
             .split(area);
@@ -130,6 +135,7 @@ impl DiffView {
         let block = Block::default()
             .title(" Files ")
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border))
             .padding(Padding::horizontal(1));
 
@@ -210,6 +216,7 @@ impl DiffView {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent));
 
         let inner = block.inner(area);
@@ -398,6 +405,7 @@ impl DiffView {
         let block = Block::default()
             .title(" Select Branch ")
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .style(Style::default().bg(theme.background));
 
@@ -454,6 +462,7 @@ impl DiffView {
         let block = Block::default()
             .style(Style::default().bg(theme.background))
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border))
             .title(" Diff View Help ")
             .title_style(

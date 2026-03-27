@@ -6,13 +6,17 @@ use super::utils::strip_ansi;
 
 const SPINNER_CHARS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-pub fn detect_status_from_content(content: &str, tool: &str, _fg_pid: Option<u32>) -> Status {
+pub fn detect_status_from_content(content: &str, tool: &str) -> Status {
+    // Strip ANSI escape codes before passing to detectors. capture-pane is
+    // called with -e (to preserve colors for the TUI preview), but color codes
+    // interspersed in text like "esc interrupt" break plain substring matches.
+    let clean = strip_ansi(content);
     let status = crate::agents::get_agent(tool)
-        .map(|a| (a.detect_status)(content))
+        .map(|a| (a.detect_status)(&clean))
         .unwrap_or(Status::Idle);
 
     if status == Status::Idle {
-        let last_lines: Vec<&str> = content.lines().rev().take(5).collect();
+        let last_lines: Vec<&str> = clean.lines().rev().take(5).collect();
         tracing::debug!(
             "status detection returned Idle for tool '{}', last 5 lines: {:?}",
             tool,
@@ -340,6 +344,84 @@ pub fn detect_cursor_status(_content: &str) -> Status {
     Status::Idle
 }
 
+/// Copilot CLI status detection via tmux pane parsing.
+/// Copilot CLI is a full-screen TUI. It shows "Thinking" while the model is
+/// processing and displays tool approval prompts when actions need confirmation.
+pub fn detect_copilot_status(raw_content: &str) -> Status {
+    let content = raw_content.to_lowercase();
+    let lines: Vec<&str> = content.lines().collect();
+    let non_empty_lines: Vec<&str> = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .copied()
+        .collect();
+
+    let last_lines: String = non_empty_lines
+        .iter()
+        .rev()
+        .take(30)
+        .rev()
+        .copied()
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let last_lines_lower = last_lines.to_lowercase();
+
+    // RUNNING: Copilot shows spinners and "Thinking" while the model is processing
+    for line in &lines {
+        for spinner in SPINNER_CHARS {
+            if line.contains(spinner) {
+                return Status::Running;
+            }
+        }
+    }
+
+    if last_lines_lower.contains("thinking")
+        || last_lines_lower.contains("working")
+        || last_lines_lower.contains("esc to interrupt")
+        || last_lines_lower.contains("ctrl+c to interrupt")
+    {
+        return Status::Running;
+    }
+
+    // WAITING: Tool approval prompts
+    let approval_prompts = [
+        "approve",
+        "allow",
+        "(y/n)",
+        "[y/n]",
+        "continue?",
+        "run command?",
+        "allow this tool",
+        "approve for the rest",
+    ];
+    for prompt in &approval_prompts {
+        if last_lines_lower.contains(prompt) {
+            return Status::Waiting;
+        }
+    }
+
+    // WAITING: Selection menus
+    if last_lines_lower.contains("enter to select") || last_lines_lower.contains("esc to cancel") {
+        return Status::Waiting;
+    }
+
+    // WAITING: Input prompt ready
+    for line in non_empty_lines.iter().rev().take(10) {
+        let clean_line = strip_ansi(line).trim().to_string();
+        if clean_line == ">" || clean_line == "> " || clean_line == "copilot>" {
+            return Status::Waiting;
+        }
+        if clean_line.starts_with("> ")
+            && !clean_line.to_lowercase().contains("esc")
+            && clean_line.len() < 100
+        {
+            return Status::Waiting;
+        }
+    }
+
+    Status::Idle
+}
+
 /// Pi coding agent status detection via tmux pane parsing.
 /// Pi always auto-approves tool use (no approval gates), so we only detect
 /// Running vs Idle/Waiting-for-input states.
@@ -478,8 +560,30 @@ mod tests {
 
     #[test]
     fn test_detect_status_from_content_unknown_tool_returns_idle() {
-        let status = detect_status_from_content("Processing ⠋", "unknown_tool", None);
+        let status = detect_status_from_content("Processing ⠋", "unknown_tool");
         assert_eq!(status, Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_status_strips_ansi_before_matching() {
+        // capture-pane -e injects ANSI color codes between characters, which
+        // can split signal strings like "esc interrupt" so they no longer match
+        // as plain substrings. The dispatcher must strip ANSI before calling
+        // any agent detector.
+        let ansi_running =
+            "\x1b[38;2;39;62;94m⬝⬝⬝⬝⬝⬝⬝⬝\x1b[0m  \x1b[38;2;238;238;238mesc \x1b[38;2;128;128;128minterrupt\x1b[0m";
+        assert_eq!(
+            detect_status_from_content(ansi_running, "opencode"),
+            Status::Running,
+            "ANSI codes around 'esc interrupt' should not prevent Running detection"
+        );
+
+        let ansi_spinner = "\x1b[38;2;255;255;255m⠋\x1b[0m generating";
+        assert_eq!(
+            detect_status_from_content(ansi_spinner, "opencode"),
+            Status::Running,
+            "ANSI codes around spinner chars should not prevent Running detection"
+        );
     }
 
     #[test]
@@ -655,6 +759,41 @@ mod tests {
     fn test_detect_gemini_status_idle() {
         assert_eq!(detect_gemini_status("file saved"), Status::Idle);
         assert_eq!(detect_gemini_status("random output text"), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_copilot_status_running() {
+        assert_eq!(
+            detect_copilot_status("processing request\nesc to interrupt"),
+            Status::Running
+        );
+        assert_eq!(
+            detect_copilot_status("Thinking about your request"),
+            Status::Running
+        );
+        assert_eq!(detect_copilot_status("working ⠋"), Status::Running);
+        assert_eq!(detect_copilot_status("loading ⠹"), Status::Running);
+    }
+
+    #[test]
+    fn test_detect_copilot_status_waiting() {
+        assert_eq!(detect_copilot_status("run command? (y/n)"), Status::Waiting);
+        assert_eq!(
+            detect_copilot_status("Allow this tool to run?"),
+            Status::Waiting
+        );
+        assert_eq!(
+            detect_copilot_status("pick an option\nenter to select"),
+            Status::Waiting
+        );
+        assert_eq!(detect_copilot_status("done\n>"), Status::Waiting);
+        assert_eq!(detect_copilot_status("done\ncopilot>"), Status::Waiting);
+    }
+
+    #[test]
+    fn test_detect_copilot_status_idle() {
+        assert_eq!(detect_copilot_status("file saved"), Status::Idle);
+        assert_eq!(detect_copilot_status("random output text"), Status::Idle);
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub enum FieldKey {
     BareRepoPathTemplate,
     WorktreeAutoCleanup,
     DeleteBranchOnCleanup,
+    WorkspacePathTemplate,
     // Sandbox
     SandboxEnabledByDefault,
     YoloModeDefault,
@@ -370,6 +371,11 @@ fn build_worktree_fields(
         global.worktree.delete_branch_on_cleanup,
         wt.and_then(|w| w.delete_branch_on_cleanup),
     );
+    let (workspace_path_template, o5) = resolve_value(
+        scope,
+        global.worktree.workspace_path_template.clone(),
+        wt.and_then(|w| w.workspace_path_template.clone()),
+    );
 
     vec![
         SettingField {
@@ -415,6 +421,18 @@ fn build_worktree_fields(
             inherited_display: inherited_if(
                 o4,
                 FieldValue::Bool(global.worktree.delete_branch_on_cleanup),
+            ),
+        },
+        SettingField {
+            key: FieldKey::WorkspacePathTemplate,
+            label: "Workspace Path Template",
+            description: "Template for multi-repo workspace directories ({branch}, {session-id})",
+            value: FieldValue::Text(workspace_path_template),
+            category: SettingsCategory::Worktree,
+            has_override: o5,
+            inherited_display: inherited_if(
+                o5,
+                FieldValue::Text(global.worktree.workspace_path_template.clone()),
             ),
         },
     ]
@@ -877,7 +895,8 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::AgentExtraArgs,
             label: "Agent Extra Args",
-            description: "Per-agent extra arguments (agent=args, e.g. opencode=--port 8080)",
+            description:
+                "Per-agent extra arguments appended after the binary (e.g. opencode=--port 8080)",
             value: FieldValue::List(extra_args_list),
             category: SettingsCategory::Session,
             has_override: extra_args_override,
@@ -889,7 +908,7 @@ fn build_session_fields(
         SettingField {
             key: FieldKey::AgentCommandOverride,
             label: "Agent Command Override",
-            description: "Per-agent command override replacing the binary (agent=command)",
+            description: "Per-agent command override replacing the binary (e.g. claude=my-wrapper)",
             value: FieldValue::List(cmd_override_list),
             category: SettingsCategory::Session,
             has_override: cmd_override_override,
@@ -1132,6 +1151,9 @@ fn apply_field_to_global(field: &SettingField, config: &mut Config) {
         (FieldKey::DeleteBranchOnCleanup, FieldValue::Bool(v)) => {
             config.worktree.delete_branch_on_cleanup = *v
         }
+        (FieldKey::WorkspacePathTemplate, FieldValue::Text(v)) => {
+            config.worktree.workspace_path_template = v.clone()
+        }
         // Sandbox
         (FieldKey::SandboxEnabledByDefault, FieldValue::Bool(v)) => {
             config.sandbox.enabled_by_default = *v
@@ -1263,6 +1285,11 @@ fn apply_field_to_profile(field: &SettingField, _global: &Config, config: &mut P
         (FieldKey::DeleteBranchOnCleanup, FieldValue::Bool(v)) => {
             set_profile_override(*v, &mut config.worktree, |s, val| {
                 s.delete_branch_on_cleanup = val
+            });
+        }
+        (FieldKey::WorkspacePathTemplate, FieldValue::Text(v)) => {
+            set_profile_override(v.clone(), &mut config.worktree, |s, val| {
+                s.workspace_path_template = val
             });
         }
         // Sandbox
