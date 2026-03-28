@@ -102,12 +102,12 @@ pub fn apply_mouse_option(session_name: &str, enabled: bool) -> Result<()> {
 }
 
 /// Ensure all aoe tmux keybindings are set (idempotent, safe to call repeatedly).
-/// - Ctrl+Q: detach (return to session manager)
+/// - Ctrl+G: detach (return to session manager)
 /// - Ctrl+B 1-5: switch to peer session by index
 pub fn ensure_detach_keybinding() {
-    // Ctrl+Q to detach
+    // Ctrl+G to detach
     let _ = Command::new("tmux")
-        .args(["bind-key", "-n", "C-q", "detach-client"])
+        .args(["bind-key", "-n", "C-g", "detach-client"])
         .output();
 
     // Resolve aoe binary path for peer switching
@@ -159,7 +159,7 @@ pub fn apply_all_tmux_options(
         }
     }
 
-    // Bind Ctrl+Q as a quick detach shortcut
+    // Bind Ctrl+G as a quick detach shortcut
     ensure_detach_keybinding();
 }
 
