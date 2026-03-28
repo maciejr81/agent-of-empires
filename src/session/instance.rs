@@ -111,6 +111,9 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_user_activity: Option<DateTime<Utc>>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_agent_activity: Option<DateTime<Utc>>,
+
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_info: Option<WorktreeInfo>,
@@ -159,6 +162,7 @@ impl Instance {
             created_at: Utc::now(),
             last_accessed_at: None,
             last_user_activity: None,
+            last_agent_activity: None,
             worktree_info: None,
             workspace_info: None,
             user_active: false,

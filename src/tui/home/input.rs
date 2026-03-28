@@ -422,6 +422,7 @@ impl HomeView {
                 DialogResult::Submit(message) => {
                     self.send_message_dialog = None;
                     if let Some(session_id) = self.pending_send_session.take() {
+                        self.update_last_user_activity(&session_id);
                         if let Some(inst) = self.get_instance(&session_id) {
                             match crate::tmux::Session::new(&inst.id, &inst.title) {
                                 Ok(tmux_session) => {

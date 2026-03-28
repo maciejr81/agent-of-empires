@@ -285,13 +285,20 @@ where
     }
 }
 
-/// Get the most recent last_user_activity among all sessions in a group.
-fn max_user_activity_in_group(path: &str, instances: &[Instance]) -> DateTime<Utc> {
+/// Most recent activity for an instance (max of user and agent activity).
+fn latest_activity(inst: &Instance) -> DateTime<Utc> {
+    let user = inst.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+    let agent = inst.last_agent_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+    user.max(agent)
+}
+
+/// Get the most recent activity among all sessions in a group.
+fn max_activity_in_group(path: &str, instances: &[Instance]) -> DateTime<Utc> {
     let prefix = format!("{}/", path);
     instances
         .iter()
         .filter(|i| i.group_path == path || i.group_path.starts_with(&prefix))
-        .filter_map(|i| i.last_user_activity)
+        .map(latest_activity)
         .max()
         .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
@@ -334,8 +341,8 @@ pub fn flatten_tree_all_profiles(
     if sort_order == SortOrder::Recent {
         let mut all_sessions: Vec<&Instance> = instances.iter().collect();
         all_sessions.sort_by(|a, b| {
-            let a_time = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
-            let b_time = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+            let a_time = latest_activity(a);
+            let b_time = latest_activity(b);
             b_time.cmp(&a_time)
         });
         for inst in all_sessions {
@@ -358,8 +365,8 @@ pub fn flatten_tree_all_profiles(
         SortOrder::Newest => ungrouped.sort_by_key(|i| Reverse(i.created_at)),
         SortOrder::RecentGrouped => {
             ungrouped.sort_by(|a, b| {
-                let a_t = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
-                let b_t = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                let a_t = latest_activity(a);
+                let b_t = latest_activity(b);
                 b_t.cmp(&a_t)
             });
         }
@@ -395,8 +402,8 @@ pub fn flatten_tree_all_profiles(
         }
         SortOrder::RecentGrouped => {
             all_roots.sort_by(|a, b| {
-                let a_t = max_user_activity_in_group(&a.1.path, &a.2);
-                let b_t = max_user_activity_in_group(&b.1.path, &b.2);
+                let a_t = max_activity_in_group(&a.1.path, &a.2);
+                let b_t = max_activity_in_group(&b.1.path, &b.2);
                 b_t.cmp(&a_t)
             });
         }
@@ -431,8 +438,8 @@ pub fn flatten_tree(
     if sort_order == SortOrder::Recent {
         let mut all_sessions: Vec<&Instance> = instances.iter().collect();
         all_sessions.sort_by(|a, b| {
-            let a_time = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
-            let b_time = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+            let a_time = latest_activity(a);
+            let b_time = latest_activity(b);
             b_time.cmp(&a_time)
         });
         for inst in all_sessions {
@@ -455,8 +462,8 @@ pub fn flatten_tree(
         SortOrder::Newest => ungrouped.sort_by_key(|i| Reverse(i.created_at)),
         SortOrder::RecentGrouped => {
             ungrouped.sort_by(|a, b| {
-                let a_t = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
-                let b_t = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                let a_t = latest_activity(a);
+                let b_t = latest_activity(b);
                 b_t.cmp(&a_t)
             });
         }
@@ -482,8 +489,8 @@ pub fn flatten_tree(
         }
         SortOrder::RecentGrouped => {
             roots_to_iterate.sort_by(|a, b| {
-                let a_t = max_user_activity_in_group(&a.path, instances);
-                let b_t = max_user_activity_in_group(&b.path, instances);
+                let a_t = max_activity_in_group(&a.path, instances);
+                let b_t = max_activity_in_group(&b.path, instances);
                 b_t.cmp(&a_t)
             });
         }
@@ -531,8 +538,8 @@ fn flatten_group(
         SortOrder::Newest => group_sessions.sort_by_key(|i| Reverse(i.created_at)),
         SortOrder::RecentGrouped => {
             group_sessions.sort_by(|a, b| {
-                let a_t = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
-                let b_t = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                let a_t = latest_activity(a);
+                let b_t = latest_activity(b);
                 b_t.cmp(&a_t)
             });
         }

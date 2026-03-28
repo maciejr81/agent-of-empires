@@ -409,6 +409,10 @@ impl HomeView {
                     self.mutate_instance(&update.id, |inst| {
                         inst.status = new_status;
                         inst.last_error = new_error;
+                        // Track agent activity when status changes to Running
+                        if new_status == Status::Running {
+                            inst.last_agent_activity = Some(chrono::Utc::now());
+                        }
                     });
 
                     if let Some(old) = old_status {
@@ -417,6 +421,14 @@ impl HomeView {
                         }
                     }
                 }
+            }
+            // Rebuild flat items and save if in a sort mode that depends on activity
+            if matches!(
+                self.sort_order,
+                SortOrder::Recent | SortOrder::RecentGrouped
+            ) {
+                let _ = self.save();
+                self.flat_items = self.build_flat_items();
             }
             self.pending_status_refresh = false;
             return true;
