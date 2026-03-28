@@ -9,6 +9,7 @@ use super::{
     ICON_EXPANDED, ICON_IDLE, ICON_RUNNING, ICON_STARTING, ICON_STOPPED, ICON_UNKNOWN,
     ICON_USER_ACTIVE, ICON_WAITING,
 };
+use crate::session::config::SortOrder;
 use crate::session::{Item, Status};
 use crate::tui::components::{HelpOverlay, Preview};
 use crate::tui::styles::Theme;
@@ -284,7 +285,19 @@ impl HomeView {
                                 Status::Deleting => theme.waiting,
                             };
                             let style = Style::default().fg(color);
-                            (icon, Cow::Borrowed(&inst.title), style)
+                            let title: Cow<str> = if self.sort_order == SortOrder::Recent
+                                && !inst.group_path.is_empty()
+                            {
+                                let short_group = inst
+                                    .group_path
+                                    .split('/')
+                                    .next_back()
+                                    .unwrap_or(&inst.group_path);
+                                Cow::Owned(format!("{}/{}", short_group, inst.title))
+                            } else {
+                                Cow::Borrowed(&inst.title)
+                            };
+                            (icon, title, style)
                         }
                         ViewMode::Terminal => {
                             // For sandboxed sessions, check the appropriate terminal based on mode
@@ -309,7 +322,19 @@ impl HomeView {
                                 (ICON_IDLE, theme.dimmed)
                             };
                             let style = Style::default().fg(color);
-                            (icon, Cow::Borrowed(&inst.title), style)
+                            let title: Cow<str> = if self.sort_order == SortOrder::Recent
+                                && !inst.group_path.is_empty()
+                            {
+                                let short_group = inst
+                                    .group_path
+                                    .split('/')
+                                    .next_back()
+                                    .unwrap_or(&inst.group_path);
+                                Cow::Owned(format!("{}/{}", short_group, inst.title))
+                            } else {
+                                Cow::Borrowed(&inst.title)
+                            };
+                            (icon, title, style)
                         }
                     }
                 } else {

@@ -285,6 +285,17 @@ where
     }
 }
 
+/// Get the most recent last_user_activity among all sessions in a group.
+fn max_user_activity_in_group(path: &str, instances: &[Instance]) -> DateTime<Utc> {
+    let prefix = format!("{}/", path);
+    instances
+        .iter()
+        .filter(|i| i.group_path == path || i.group_path.starts_with(&prefix))
+        .filter_map(|i| i.last_user_activity)
+        .max()
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
 /// Get the most recent created_at among all sessions (direct and nested) in a group.
 /// Returns DateTime::MIN_UTC if the group has no sessions.
 fn max_created_at_in_group(path: &str, instances: &[Instance]) -> DateTime<Utc> {
@@ -319,6 +330,23 @@ pub fn flatten_tree_all_profiles(
 ) -> Vec<Item> {
     let mut items = Vec::new();
 
+    // "Recent" mode: flat list of ALL sessions sorted by user activity, no group hierarchy
+    if sort_order == SortOrder::Recent {
+        let mut all_sessions: Vec<&Instance> = instances.iter().collect();
+        all_sessions.sort_by(|a, b| {
+            let a_time = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+            let b_time = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+            b_time.cmp(&a_time)
+        });
+        for inst in all_sessions {
+            items.push(Item::Session {
+                id: inst.id.clone(),
+                depth: 0,
+            });
+        }
+        return items;
+    }
+
     // Collect all ungrouped sessions across all profiles
     let mut ungrouped: Vec<&Instance> = instances
         .iter()
@@ -328,6 +356,13 @@ pub fn flatten_tree_all_profiles(
     match sort_order {
         SortOrder::Oldest => ungrouped.sort_by_key(|i| i.created_at),
         SortOrder::Newest => ungrouped.sort_by_key(|i| Reverse(i.created_at)),
+        SortOrder::RecentGrouped => {
+            ungrouped.sort_by(|a, b| {
+                let a_t = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                let b_t = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                b_t.cmp(&a_t)
+            });
+        }
         _ => sort_by_name(&mut ungrouped, sort_order, |i| &i.title),
     }
 
@@ -358,6 +393,13 @@ pub fn flatten_tree_all_profiles(
         SortOrder::Newest => {
             all_roots.sort_by_key(|(_, g, insts)| Reverse(max_created_at_in_group(&g.path, insts)));
         }
+        SortOrder::RecentGrouped => {
+            all_roots.sort_by(|a, b| {
+                let a_t = max_user_activity_in_group(&a.1.path, &a.2);
+                let b_t = max_user_activity_in_group(&b.1.path, &b.2);
+                b_t.cmp(&a_t)
+            });
+        }
         _ => all_roots.sort_by_key(|(_, g, _)| g.name.to_lowercase()),
     }
     if matches!(sort_order, SortOrder::ZA) {
@@ -385,6 +427,23 @@ pub fn flatten_tree(
 ) -> Vec<Item> {
     let mut items = Vec::new();
 
+    // "Recent" mode: flat list of ALL sessions sorted by user activity, no group hierarchy
+    if sort_order == SortOrder::Recent {
+        let mut all_sessions: Vec<&Instance> = instances.iter().collect();
+        all_sessions.sort_by(|a, b| {
+            let a_time = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+            let b_time = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+            b_time.cmp(&a_time)
+        });
+        for inst in all_sessions {
+            items.push(Item::Session {
+                id: inst.id.clone(),
+                depth: 0,
+            });
+        }
+        return items;
+    }
+
     // Add ungrouped sessions first (always at top, sorted if needed)
     let mut ungrouped: Vec<&Instance> = instances
         .iter()
@@ -394,6 +453,13 @@ pub fn flatten_tree(
     match sort_order {
         SortOrder::Oldest => ungrouped.sort_by_key(|i| i.created_at),
         SortOrder::Newest => ungrouped.sort_by_key(|i| Reverse(i.created_at)),
+        SortOrder::RecentGrouped => {
+            ungrouped.sort_by(|a, b| {
+                let a_t = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                let b_t = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                b_t.cmp(&a_t)
+            });
+        }
         _ => sort_by_name(&mut ungrouped, sort_order, |i| &i.title),
     }
 
@@ -413,6 +479,13 @@ pub fn flatten_tree(
         }
         SortOrder::Newest => {
             roots_to_iterate.sort_by_key(|g| Reverse(max_created_at_in_group(&g.path, instances)));
+        }
+        SortOrder::RecentGrouped => {
+            roots_to_iterate.sort_by(|a, b| {
+                let a_t = max_user_activity_in_group(&a.path, instances);
+                let b_t = max_user_activity_in_group(&b.path, instances);
+                b_t.cmp(&a_t)
+            });
         }
         _ => sort_by_name(&mut roots_to_iterate, sort_order, |g| &g.name),
     }
@@ -456,6 +529,13 @@ fn flatten_group(
     match sort_order {
         SortOrder::Oldest => group_sessions.sort_by_key(|i| i.created_at),
         SortOrder::Newest => group_sessions.sort_by_key(|i| Reverse(i.created_at)),
+        SortOrder::RecentGrouped => {
+            group_sessions.sort_by(|a, b| {
+                let a_t = a.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                let b_t = b.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
+                b_t.cmp(&a_t)
+            });
+        }
         _ => sort_by_name(&mut group_sessions, sort_order, |i| &i.title),
     }
 
@@ -846,7 +926,9 @@ mod tests {
     #[test]
     fn test_sort_order_cycle() {
         assert_eq!(SortOrder::Newest.cycle(), SortOrder::Oldest);
-        assert_eq!(SortOrder::Oldest.cycle(), SortOrder::AZ);
+        assert_eq!(SortOrder::Oldest.cycle(), SortOrder::Recent);
+        assert_eq!(SortOrder::Recent.cycle(), SortOrder::RecentGrouped);
+        assert_eq!(SortOrder::RecentGrouped.cycle(), SortOrder::AZ);
         assert_eq!(SortOrder::AZ.cycle(), SortOrder::ZA);
         assert_eq!(SortOrder::ZA.cycle(), SortOrder::Newest);
     }

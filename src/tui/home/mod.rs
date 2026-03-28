@@ -843,6 +843,15 @@ impl HomeView {
             .any(|t| !t.get_all_groups().is_empty())
     }
 
+    /// Update last_user_activity timestamp for a session and persist.
+    pub fn update_last_user_activity(&mut self, session_id: &str) {
+        self.mutate_instance(session_id, |inst| {
+            inst.last_user_activity = Some(chrono::Utc::now());
+        });
+        let _ = self.save();
+        self.flat_items = self.build_flat_items();
+    }
+
     /// Centralized instance addition: adds to both the `instances` vec
     /// and `instance_map` to keep both collections in sync.
     pub(super) fn add_instance(&mut self, instance: Instance) {

@@ -387,6 +387,8 @@ impl App {
         session_id: &str,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
+        self.home.update_last_user_activity(session_id);
+
         let instance = match self.home.get_instance(session_id) {
             Some(inst) => inst.clone(),
             None => return Ok(()),
@@ -485,6 +487,8 @@ impl App {
         mode: TerminalMode,
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
+        self.home.update_last_user_activity(session_id);
+
         let instance = match self.home.get_instance(session_id) {
             Some(inst) => inst.clone(),
             None => return Ok(()),

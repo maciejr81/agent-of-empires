@@ -1497,6 +1497,12 @@ fn test_o_key_cycles_sort_order_forward() {
     assert_eq!(env.view.sort_order, SortOrder::Oldest);
 
     env.view.handle_key(key(KeyCode::Char('o')));
+    assert_eq!(env.view.sort_order, SortOrder::Recent);
+
+    env.view.handle_key(key(KeyCode::Char('o')));
+    assert_eq!(env.view.sort_order, SortOrder::RecentGrouped);
+
+    env.view.handle_key(key(KeyCode::Char('o')));
     assert_eq!(env.view.sort_order, SortOrder::AZ);
 
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1514,7 +1520,7 @@ fn test_ctrl_o_key_cycles_sort_order_backward() {
     let mut env = create_test_env_with_mixed_sessions();
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 
-    // Ctrl+o cycles backward: Oldest -> ZA -> AZ -> Newest -> Oldest
+    // Ctrl+o cycles backward: Newest -> ZA -> AZ -> RecentGrouped -> Recent -> Oldest -> Newest
     env.view
         .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(env.view.sort_order, SortOrder::ZA);
@@ -1522,6 +1528,14 @@ fn test_ctrl_o_key_cycles_sort_order_backward() {
     env.view
         .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(env.view.sort_order, SortOrder::AZ);
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(env.view.sort_order, SortOrder::RecentGrouped);
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(env.view.sort_order, SortOrder::Recent);
 
     env.view
         .handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
@@ -1540,7 +1554,9 @@ fn test_o_key_flat_items_sorted_az() {
     let mut env = create_test_env_with_mixed_sessions();
     assert_eq!(env.view.sort_order, SortOrder::Newest);
 
-    // Press 'o' twice to get to AZ (Newest -> Oldest -> AZ)
+    // Press 'o' four times to get to AZ (Newest -> Oldest -> Recent -> RecentGrouped -> AZ)
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     assert_eq!(env.view.sort_order, SortOrder::AZ);
@@ -1572,7 +1588,9 @@ fn test_o_key_flat_items_sorted_za() {
 
     let mut env = create_test_env_with_mixed_sessions();
 
-    // Press 'o' three times to get to ZA (Oldest -> Newest -> AZ -> ZA)
+    // Press 'o' five times to get to ZA (Newest -> Oldest -> Recent -> RecentGrouped -> AZ -> ZA)
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
@@ -1605,7 +1623,9 @@ fn test_o_key_flat_items_newest_preserves_insertion_order() {
 
     let mut env = create_test_env_with_mixed_sessions();
 
-    // Press 'o' four times to wrap back to Newest (Newest -> Oldest -> AZ -> ZA -> Newest)
+    // Press 'o' six times to wrap back to Newest
+    env.view.handle_key(key(KeyCode::Char('o')));
+    env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));
     env.view.handle_key(key(KeyCode::Char('o')));

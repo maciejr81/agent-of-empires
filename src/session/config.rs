@@ -56,13 +56,17 @@ pub enum SortOrder {
     Oldest,
     AZ,
     ZA,
+    Recent,
+    RecentGrouped,
 }
 
 impl SortOrder {
     pub fn cycle(self) -> Self {
         match self {
             SortOrder::Newest => SortOrder::Oldest,
-            SortOrder::Oldest => SortOrder::AZ,
+            SortOrder::Oldest => SortOrder::Recent,
+            SortOrder::Recent => SortOrder::RecentGrouped,
+            SortOrder::RecentGrouped => SortOrder::AZ,
             SortOrder::AZ => SortOrder::ZA,
             SortOrder::ZA => SortOrder::Newest,
         }
@@ -72,7 +76,9 @@ impl SortOrder {
         match self {
             SortOrder::Newest => SortOrder::ZA,
             SortOrder::Oldest => SortOrder::Newest,
-            SortOrder::AZ => SortOrder::Oldest,
+            SortOrder::Recent => SortOrder::Oldest,
+            SortOrder::RecentGrouped => SortOrder::Recent,
+            SortOrder::AZ => SortOrder::RecentGrouped,
             SortOrder::ZA => SortOrder::AZ,
         }
     }
@@ -81,6 +87,8 @@ impl SortOrder {
         match self {
             SortOrder::Newest => "Newest",
             SortOrder::Oldest => "Oldest",
+            SortOrder::Recent => "Recent",
+            SortOrder::RecentGrouped => "Recent (grouped)",
             SortOrder::AZ => "A-Z",
             SortOrder::ZA => "Z-A",
         }
