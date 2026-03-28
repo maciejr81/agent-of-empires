@@ -550,6 +550,11 @@ impl Instance {
         self.apply_session_tmux_options(&name, &self.title);
     }
 
+    /// Public wrapper to re-apply tmux options (status bar, keybindings) on attach.
+    pub fn apply_tmux_options_pub(&self) {
+        self.apply_tmux_options();
+    }
+
     fn apply_terminal_tmux_options(&self) {
         let name = tmux::TerminalSession::generate_name(&self.id, &self.title);
         self.apply_session_tmux_options(&name, &format!("{} (terminal)", self.title));

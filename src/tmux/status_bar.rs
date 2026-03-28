@@ -12,6 +12,10 @@ pub struct SandboxDisplay {
 }
 
 /// Convert a ratatui Color to a tmux-compatible hex color string (e.g. "#0f172a").
+pub fn color_to_tmux_pub(color: Color) -> String {
+    color_to_tmux(color)
+}
+
 fn color_to_tmux(color: Color) -> String {
     match color {
         Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
@@ -46,31 +50,31 @@ pub fn apply_status_bar(
     let accent = color_to_tmux(theme.accent);
     let fg = color_to_tmux(theme.text);
     let bg = color_to_tmux(theme.background);
-    let branch_color = color_to_tmux(theme.branch);
-    let sandbox_color = color_to_tmux(theme.sandbox);
+    let _branch_color = color_to_tmux(theme.branch);
+    let _sandbox_color = color_to_tmux(theme.sandbox);
     let hint = color_to_tmux(theme.dimmed);
 
-    // Format: "aoe: Title | branch | [container] | 14:30"
+    let aoe_bin = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "aoe".to_string());
+
+    // #() runs periodically to update @aoe_peers; #{@aoe_peers} displays instantly
     let status_format = format!(
-        " #[fg={accent},bold]aoe#[fg={fg},nobold]: \
-         #{{@aoe_title}}\
-         #{{?#{{@aoe_branch}}, #[fg={branch_color}]| #{{@aoe_branch}}#[fg={fg}],}}\
-         #{{?#{{@aoe_sandbox}}, #[fg={sandbox_color}]\u{2b21} #{{@aoe_sandbox}}#[fg={fg}],}}\
-          | %H:%M ",
+        "#({aoe_bin} tmux peers)#{{@aoe_peers}}\
+         #[fg={hint}] %H:%M ",
     );
 
     set_session_option(session_name, "status-right", &status_format)?;
-    set_session_option(session_name, "status-right-length", "80")?;
+    set_session_option(session_name, "status-right-length", "100")?;
 
     set_session_option(session_name, "status-style", &format!("bg={bg},fg={fg}"))?;
     set_session_option(
         session_name,
         "status-left",
-        &format!(
-            " #[fg={accent},bold]#S#[fg={fg},nobold] \u{2502} #[fg={hint}]Ctrl+b d#[fg={hint}] to detach ",
-        ),
+        &format!(" #[fg={accent},bold]#{{@aoe_title}}#[fg={fg},nobold] "),
     )?;
-    set_session_option(session_name, "status-left-length", "50")?;
+    set_session_option(session_name, "status-left-length", "25")?;
+    set_session_option(session_name, "status-interval", "5")?;
 
     Ok(())
 }
@@ -95,6 +99,33 @@ fn set_session_option(session_name: &str, option: &str, value: &str) -> Result<(
 pub fn apply_mouse_option(session_name: &str, enabled: bool) -> Result<()> {
     let value = if enabled { "on" } else { "off" };
     set_session_option(session_name, "mouse", value)
+}
+
+/// Ensure all aoe tmux keybindings are set (idempotent, safe to call repeatedly).
+/// - Ctrl+Q: detach (return to session manager)
+/// - Ctrl+B 1-5: switch to peer session by index
+pub fn ensure_detach_keybinding() {
+    // Ctrl+Q to detach
+    let _ = Command::new("tmux")
+        .args(["bind-key", "-n", "C-q", "detach-client"])
+        .output();
+
+    // Resolve aoe binary path for peer switching
+    let aoe_bin = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "aoe".to_string());
+
+    // Ctrl+B 1-5 to switch to peer sessions
+    for i in 1..=5 {
+        let _ = Command::new("tmux")
+            .args([
+                "bind-key",
+                &i.to_string(),
+                "run-shell",
+                &format!("{} tmux switch {}", aoe_bin, i),
+            ])
+            .output();
+    }
 }
 
 /// Apply all configured tmux options to a session.
@@ -127,6 +158,9 @@ pub fn apply_all_tmux_options(
             tracing::debug!("Failed to apply tmux mouse option: {}", e);
         }
     }
+
+    // Bind Ctrl+Q as a quick detach shortcut
+    ensure_detach_keybinding();
 }
 
 /// Session info retrieved from tmux user options.

@@ -244,6 +244,8 @@ impl HomeView {
 
         use std::borrow::Cow;
 
+        let show_prefix = self.sort_order == SortOrder::Recent;
+
         let (icon, text, style): (&str, Cow<str>, Style) = match item {
             Item::Group {
                 name,
@@ -251,17 +253,33 @@ impl HomeView {
                 session_count,
                 ..
             } => {
-                let icon = if *collapsed {
-                    ICON_COLLAPSED
+                if self.sort_order == SortOrder::RecentGrouped {
+                    // Text only; actual rendering handled by separator block above
+                    let text = Cow::Borrowed(name.as_str());
+                    let style = Style::default().fg(theme.title);
+                    ("", text, style)
                 } else {
-                    ICON_EXPANDED
-                };
-                let text = Cow::Owned(format!("{} ({})", name, session_count));
-                let style = Style::default().fg(theme.group).bold();
-                (icon, text, style)
+                    let icon = if *collapsed {
+                        ICON_COLLAPSED
+                    } else {
+                        ICON_EXPANDED
+                    };
+                    let text = Cow::Owned(format!("{} ({})", name, session_count));
+                    let style = Style::default().fg(theme.group).bold();
+                    (icon, text, style)
+                }
             }
             Item::Session { id, .. } => {
                 if let Some(inst) = self.get_instance(id) {
+                    // Build title with group prefix for Recent sort modes
+                    let title: Cow<str> = if show_prefix && !inst.group_path.is_empty() {
+                        let prefix =
+                            self.group_display_prefix(&inst.group_path, &inst.source_profile);
+                        Cow::Owned(format!("[{}] {}", prefix, inst.title))
+                    } else {
+                        Cow::Borrowed(&inst.title)
+                    };
+
                     match self.view_mode {
                         ViewMode::Agent => {
                             let icon = match inst.status {
@@ -285,22 +303,9 @@ impl HomeView {
                                 Status::Deleting => theme.waiting,
                             };
                             let style = Style::default().fg(color);
-                            let title: Cow<str> = if self.sort_order == SortOrder::Recent
-                                && !inst.group_path.is_empty()
-                            {
-                                let short_group = inst
-                                    .group_path
-                                    .split('/')
-                                    .next_back()
-                                    .unwrap_or(&inst.group_path);
-                                Cow::Owned(format!("{}/{}", short_group, inst.title))
-                            } else {
-                                Cow::Borrowed(&inst.title)
-                            };
                             (icon, title, style)
                         }
                         ViewMode::Terminal => {
-                            // For sandboxed sessions, check the appropriate terminal based on mode
                             let terminal_mode = if inst.is_sandboxed() {
                                 self.get_terminal_mode(id)
                             } else {
@@ -322,18 +327,6 @@ impl HomeView {
                                 (ICON_IDLE, theme.dimmed)
                             };
                             let style = Style::default().fg(color);
-                            let title: Cow<str> = if self.sort_order == SortOrder::Recent
-                                && !inst.group_path.is_empty()
-                            {
-                                let short_group = inst
-                                    .group_path
-                                    .split('/')
-                                    .next_back()
-                                    .unwrap_or(&inst.group_path);
-                                Cow::Owned(format!("{}/{}", short_group, inst.title))
-                            } else {
-                                Cow::Borrowed(&inst.title)
-                            };
                             (icon, title, style)
                         }
                     }
@@ -346,6 +339,18 @@ impl HomeView {
                 }
             }
         };
+
+        // RecentGrouped group separators: render as a section label
+        if matches!(item, Item::Group { .. }) && self.sort_order == SortOrder::RecentGrouped {
+            let label = text.into_owned();
+            let label_style = Style::default().fg(theme.title);
+            let separator_line = Line::from(Span::styled(label, label_style));
+            return if is_selected {
+                ListItem::new(separator_line).style(Style::default().bg(theme.session_selection))
+            } else {
+                ListItem::new(separator_line)
+            };
+        }
 
         let mut line_spans = Vec::with_capacity(5);
         line_spans.push(Span::raw(indent));

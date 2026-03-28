@@ -22,6 +22,8 @@ pub struct RenameData {
     pub group: Option<String>,
     /// New profile (None means keep current, Some(name) means move to that profile)
     pub profile: Option<String>,
+    /// New group prefix (None means keep current, Some("") means reset to auto)
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,11 +37,13 @@ pub struct RenameDialog {
     current_title: String,
     current_group: String,
     current_profile: String,
+    current_prefix: String,
     available_profiles: Vec<String>,
     new_title: Input,
     new_group: Input,
+    new_prefix: Input,
     profile_index: usize,
-    focused_field: usize, // Session: 0=title, 1=group, 2=profile; Group: 0=group, 1=profile
+    focused_field: usize, // Session: 0=title, 1=group, 2=profile; Group: 0=group, 1=prefix, 2=profile
     existing_groups: Vec<String>,
     group_picker: ListPicker,
     group_ghost: Option<GroupGhostCompletion>,
@@ -67,9 +71,11 @@ impl RenameDialog {
             current_title: current_title.to_string(),
             current_group: current_group.to_string(),
             current_profile: current_profile.to_string(),
+            current_prefix: String::new(),
             available_profiles,
             new_title: Input::default(),
             new_group: Input::new(current_group.to_string()),
+            new_prefix: Input::default(),
             profile_index,
             focused_field: 0,
             existing_groups,
@@ -80,6 +86,7 @@ impl RenameDialog {
 
     pub fn new_for_group(
         current_group: &str,
+        current_prefix: &str,
         current_profile: &str,
         available_profiles: Vec<String>,
         existing_groups: Vec<String>,
@@ -94,9 +101,11 @@ impl RenameDialog {
             current_title: String::new(),
             current_group: current_group.to_string(),
             current_profile: current_profile.to_string(),
+            current_prefix: current_prefix.to_string(),
             available_profiles,
             new_title: Input::default(),
             new_group: Input::new(current_group.to_string()),
+            new_prefix: Input::new(current_prefix.to_string()),
             profile_index,
             focused_field: 0,
             existing_groups,
@@ -108,7 +117,7 @@ impl RenameDialog {
     fn field_count(&self) -> usize {
         match self.mode {
             RenameMode::Session => 3, // title, group, profile
-            RenameMode::Group => 2,   // group, profile
+            RenameMode::Group => 3,   // group, prefix, profile
         }
     }
 
@@ -121,6 +130,7 @@ impl RenameDialog {
             },
             RenameMode::Group => match self.focused_field {
                 0 => Some(&mut self.new_group),
+                1 => Some(&mut self.new_prefix),
                 _ => None,
             },
         }
@@ -133,10 +143,14 @@ impl RenameDialog {
         }
     }
 
+    fn is_prefix_field(&self) -> bool {
+        matches!(self.mode, RenameMode::Group) && self.focused_field == 1
+    }
+
     fn is_profile_field(&self) -> bool {
         match self.mode {
             RenameMode::Session => self.focused_field == 2,
-            RenameMode::Group => self.focused_field == 1,
+            RenameMode::Group => self.focused_field == 2,
         }
     }
 
@@ -213,18 +227,20 @@ impl RenameDialog {
             KeyCode::Enter => {
                 let title_value = self.new_title.value().trim().to_string();
                 let group_value = self.new_group.value().trim();
+                let prefix_value = self.new_prefix.value().trim().to_string();
                 let selected_profile = self.selected_profile();
                 let profile_changed = selected_profile != self.current_profile;
+                let prefix_changed = prefix_value != self.current_prefix;
 
                 // If nothing has changed, cancel
-                if title_value.is_empty() && group_value == self.current_group && !profile_changed {
+                if title_value.is_empty()
+                    && group_value == self.current_group
+                    && !profile_changed
+                    && !prefix_changed
+                {
                     return DialogResult::Cancel;
                 }
 
-                // Determine the group value:
-                // - Same as current means keep current group (None)
-                // - Empty (and was non-empty) means remove from group (Some(""))
-                // - Any other changed value means set new group
                 let group = if group_value == self.current_group {
                     None
                 } else if group_value.is_empty() {
@@ -233,9 +249,14 @@ impl RenameDialog {
                     Some(group_value.to_string())
                 };
 
-                // Determine profile value
                 let profile = if profile_changed {
                     Some(selected_profile.to_string())
+                } else {
+                    None
+                };
+
+                let prefix = if prefix_changed {
+                    Some(prefix_value)
                 } else {
                     None
                 };
@@ -244,6 +265,7 @@ impl RenameDialog {
                     title: title_value,
                     group,
                     profile,
+                    prefix,
                 })
             }
             KeyCode::Tab => {
@@ -383,7 +405,7 @@ impl RenameDialog {
 
     fn render_group(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let dialog_width = 50;
-        let dialog_area = super::centered_rect(area, dialog_width, 13);
+        let dialog_area = super::centered_rect(area, dialog_width, 15);
 
         frame.render_widget(Clear, dialog_area);
 
@@ -404,28 +426,22 @@ impl RenameDialog {
                 Constraint::Length(1), // Current profile
                 Constraint::Length(1), // Spacer
                 Constraint::Length(1), // New group field
+                Constraint::Length(1), // Prefix field
                 Constraint::Length(1), // Profile selector
                 Constraint::Length(1), // Spacer
                 Constraint::Min(1),    // Hint
             ])
             .split(inner);
 
-        // Current group
         self.render_current_group(frame, chunks[0], theme);
-
-        // Current profile
         self.render_current_profile(frame, chunks[1], theme);
 
-        // New group field
         self.render_group_field(frame, chunks[3], theme);
+        self.render_prefix_field(frame, chunks[4], theme);
+        self.render_profile_selector(frame, chunks[5], theme);
 
-        // Profile selector
-        self.render_profile_selector(frame, chunks[4], theme);
+        self.render_hints(frame, chunks[7], theme);
 
-        // Hint
-        self.render_hints(frame, chunks[6], theme);
-
-        // Render group picker overlay
         if self.group_picker.is_active() {
             self.group_picker.render(frame, area, theme);
         }
@@ -466,6 +482,18 @@ impl RenameDialog {
             self.is_group_field(),
             group_hint,
             self.group_ghost_text(),
+            theme,
+        );
+    }
+
+    fn render_prefix_field(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        render_text_field(
+            frame,
+            area,
+            "Prefix:    ",
+            &self.new_prefix,
+            self.is_prefix_field(),
+            Some("auto (first 3 chars)"),
             theme,
         );
     }

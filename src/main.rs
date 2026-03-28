@@ -45,6 +45,8 @@ async fn main() -> Result<()> {
             use cli::tmux::TmuxCommands;
             return match command {
                 TmuxCommands::Status(args) => cli::tmux::run_status(args),
+                TmuxCommands::Peers => cli::tmux::run_peers(),
+                TmuxCommands::Switch(args) => cli::tmux::run_switch(args),
             };
         }
         Some(Commands::Sounds { command }) => return cli::sounds::run(command).await,

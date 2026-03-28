@@ -14,6 +14,10 @@ pub struct Group {
     pub path: String,
     #[serde(default)]
     pub collapsed: bool,
+    /// Custom short prefix for display in Recent sort modes (e.g. "AOE").
+    /// When None, auto-derives from the first 3 characters of the group name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
     #[serde(skip)]
     pub children: Vec<Group>,
 }
@@ -24,8 +28,17 @@ impl Group {
             name: name.to_string(),
             path: path.to_string(),
             collapsed: false,
+            prefix: None,
             children: Vec::new(),
         }
+    }
+
+    /// Short prefix for display in Recent sort modes.
+    /// Returns the custom prefix if set, otherwise the first 3 chars of the name uppercased.
+    pub fn display_prefix(&self) -> String {
+        self.prefix
+            .clone()
+            .unwrap_or_else(|| self.name.chars().take(3).collect::<String>().to_uppercase())
     }
 }
 
@@ -165,6 +178,17 @@ impl GroupTree {
         self.groups_by_path.contains_key(path)
     }
 
+    pub fn get_group(&self, path: &str) -> Option<&Group> {
+        self.groups_by_path.get(path)
+    }
+
+    pub fn set_group_prefix(&mut self, path: &str, prefix: Option<String>) {
+        if let Some(group) = self.groups_by_path.get_mut(path) {
+            group.prefix = prefix;
+            self.rebuild_tree();
+        }
+    }
+
     pub fn get_all_groups(&self) -> Vec<Group> {
         // Return in insertion order so groups.json preserves creation order
         self.insertion_order
@@ -285,11 +309,11 @@ where
     }
 }
 
-/// Most recent activity for an instance (max of user and agent activity).
+/// Most recent user-driven activity for an instance.
+/// Only user actions (attaching a session, sending a message) count --
+/// agent status changes do not affect sort position.
 fn latest_activity(inst: &Instance) -> DateTime<Utc> {
-    let user = inst.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let agent = inst.last_agent_activity.unwrap_or(DateTime::<Utc>::MIN_UTC);
-    user.max(agent)
+    inst.last_user_activity.unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
 /// Get the most recent activity among all sessions in a group.
@@ -546,10 +570,15 @@ fn flatten_group(
         _ => sort_by_name(&mut group_sessions, sort_order, |i| &i.title),
     }
 
+    let session_depth = if sort_order == SortOrder::RecentGrouped {
+        0
+    } else {
+        depth + 1
+    };
     for inst in group_sessions {
         items.push(Item::Session {
             id: inst.id.clone(),
-            depth: depth + 1,
+            depth: session_depth,
         });
     }
 

@@ -349,6 +349,23 @@ impl HomeView {
                             ) {
                                 tracing::error!("Failed to rename group: {}", e);
                             }
+                            // Apply prefix change if provided
+                            if let Some(prefix_val) = data.prefix {
+                                if let Some(ctx) = &self.group_rename_context {
+                                    let group_path = data.group.as_deref().unwrap_or(&ctx.old_path);
+                                    let profile =
+                                        data.profile.as_deref().unwrap_or(&ctx.old_profile);
+                                    let prefix = if prefix_val.is_empty() {
+                                        None
+                                    } else {
+                                        Some(prefix_val)
+                                    };
+                                    if let Some(tree) = self.group_trees.get_mut(profile) {
+                                        tree.set_group_prefix(group_path, prefix);
+                                    }
+                                    let _ = self.save();
+                                }
+                            }
                         }
                     }
                 }
@@ -795,12 +812,19 @@ impl HomeView {
                         list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
                     let existing_groups: Vec<String> =
                         self.all_groups().iter().map(|g| g.path.clone()).collect();
+                    let current_prefix = self
+                        .group_trees
+                        .get(&current_profile)
+                        .and_then(|tree| tree.get_group(&group_path))
+                        .and_then(|g| g.prefix.clone())
+                        .unwrap_or_default();
                     self.group_rename_context = Some(super::GroupRenameContext {
                         old_path: group_path.clone(),
                         old_profile: current_profile.clone(),
                     });
                     self.rename_dialog = Some(RenameDialog::new_for_group(
                         &group_path,
+                        &current_prefix,
                         &current_profile,
                         profiles,
                         existing_groups,

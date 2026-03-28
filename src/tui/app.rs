@@ -467,12 +467,28 @@ impl App {
             self.home.set_instance_error(session_id, None);
         }
 
+        // Apply status bar and keybindings before every attach
+        instance.apply_tmux_options_pub();
+        crate::tmux::status_bar::ensure_detach_keybinding();
+
         let attach_result = with_raw_mode_disabled(terminal, || tmux_session.attach())?;
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
         self.home.reload()?;
-        self.home.select_session_by_id(session_id);
+
+        // Select the session the user was LAST in (they may have switched
+        // via Ctrl+B N during the attach). Find the session with the most
+        // recent last_user_activity; fall back to the original session.
+        let most_recent_id = self
+            .home
+            .instances()
+            .iter()
+            .filter(|i| i.last_user_activity.is_some())
+            .max_by_key(|i| i.last_user_activity)
+            .map(|i| i.id.clone());
+        let select_id = most_recent_id.as_deref().unwrap_or(session_id);
+        self.home.select_session_by_id(select_id);
 
         if let Err(e) = attach_result {
             tracing::warn!("tmux attach returned error: {}", e);
@@ -534,6 +550,8 @@ impl App {
                 Box::new(move || terminal_session.attach())
             }
         };
+
+        crate::tmux::status_bar::ensure_detach_keybinding();
 
         let attach_result = with_raw_mode_disabled(terminal, attach_fn)?;
 

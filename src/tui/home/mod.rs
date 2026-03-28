@@ -422,14 +422,8 @@ impl HomeView {
                     }
                 }
             }
-            // Rebuild flat items and save if in a sort mode that depends on activity
-            if matches!(
-                self.sort_order,
-                SortOrder::Recent | SortOrder::RecentGrouped
-            ) {
-                let _ = self.save();
-                self.flat_items = self.build_flat_items();
-            }
+            // Agent status changes no longer affect sort position (only user
+            // actions do), so no need to rebuild flat items here.
             self.pending_status_refresh = false;
             return true;
         }
@@ -853,6 +847,24 @@ impl HomeView {
         self.group_trees
             .values()
             .any(|t| !t.get_all_groups().is_empty())
+    }
+
+    /// Get the display prefix for a group, looking it up across all profiles.
+    pub fn group_display_prefix(&self, group_path: &str, profile: &str) -> String {
+        self.group_trees
+            .get(profile)
+            .and_then(|tree| tree.get_group(group_path))
+            .map(|g| g.display_prefix())
+            .unwrap_or_else(|| {
+                group_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(group_path)
+                    .chars()
+                    .take(3)
+                    .collect::<String>()
+                    .to_uppercase()
+            })
     }
 
     /// Update last_user_activity timestamp for a session and persist.
