@@ -120,12 +120,12 @@ impl Theme {
 
             title: Color::Rgb(57, 255, 20),
             text: Color::Rgb(180, 255, 180),
-            dimmed: Color::Rgb(80, 120, 90),
+            dimmed: Color::Rgb(100, 145, 110),
             hint: Color::Rgb(100, 160, 120),
 
             running: Color::Rgb(0, 255, 180),
             waiting: Color::Rgb(255, 180, 60),
-            idle: Color::Rgb(60, 100, 70),
+            idle: Color::Rgb(90, 140, 100),
             error: Color::Rgb(255, 100, 80),
             terminal_active: Color::Rgb(130, 170, 255),
 
