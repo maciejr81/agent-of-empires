@@ -292,6 +292,8 @@ impl HomeView {
                                 tracing::error!("Failed to force remove session: {}", e);
                             }
                         }
+                    } else if action == "quit_during_creation" {
+                        return Some(Action::Quit);
                     }
                 }
             }
@@ -508,7 +510,7 @@ impl HomeView {
                 // Quick-attach to paired terminal from any view
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
-                        if inst.status == Status::Deleting {
+                        if matches!(inst.status, Status::Deleting | Status::Creating) {
                             return None;
                         }
                     }
@@ -552,6 +554,11 @@ impl HomeView {
                         (self.search_match_index + 1) % self.search_matches.len();
                     self.cursor = self.search_matches[self.search_match_index];
                     self.update_selected();
+                } else if self.creating_stub_id.is_some() {
+                    self.info_dialog = Some(InfoDialog::new(
+                        "Please Wait",
+                        "A session is already being created. Wait for it to finish or press Ctrl+C to cancel.",
+                    ));
                 } else {
                     let existing_titles: Vec<String> =
                         self.instances().iter().map(|i| i.title.clone()).collect();
@@ -581,6 +588,11 @@ impl HomeView {
                     };
                     self.cursor = self.search_matches[self.search_match_index];
                     self.update_selected();
+                } else if self.creating_stub_id.is_some() {
+                    self.info_dialog = Some(InfoDialog::new(
+                        "Please Wait",
+                        "A session is already being created. Wait for it to finish or press Ctrl+C to cancel.",
+                    ));
                 } else {
                     // Pre-filled new session from selection
                     let prefill_path = self
@@ -686,7 +698,10 @@ impl HomeView {
             KeyCode::Char('x') => {
                 if let Some(session_id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(session_id) {
-                        if inst.status == Status::Stopped || inst.status == Status::Deleting {
+                        if matches!(
+                            inst.status,
+                            Status::Stopped | Status::Deleting | Status::Creating
+                        ) {
                             return None;
                         }
                         let message = format!("Are you sure you want to stop '{}'?", inst.title);
@@ -707,6 +722,9 @@ impl HomeView {
                 }
                 if let Some(session_id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(session_id) {
+                        if inst.status == Status::Creating {
+                            return None;
+                        }
                         if inst.status == Status::Deleting {
                             let message = format!(
                                 "'{}' is stuck deleting. Force remove it from the session list? \
@@ -778,7 +796,7 @@ impl HomeView {
             KeyCode::Char('r') => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
-                        if inst.status == Status::Deleting {
+                        if matches!(inst.status, Status::Deleting | Status::Creating) {
                             return None;
                         }
                         let current_profile = self
@@ -823,6 +841,9 @@ impl HomeView {
             KeyCode::Char('m') => {
                 if let Some(id) = self.selected_session.clone() {
                     if let Some(inst) = self.get_instance(&id) {
+                        if inst.status == Status::Creating {
+                            return None;
+                        }
                         let title = inst.title.clone();
                         let inst_id = inst.id.clone();
                         let tmux_session = crate::tmux::Session::new(&inst_id, &title).ok();
@@ -865,7 +886,7 @@ impl HomeView {
             KeyCode::Enter => {
                 if let Some(id) = &self.selected_session {
                     if let Some(inst) = self.get_instance(id) {
-                        if inst.status == Status::Deleting {
+                        if matches!(inst.status, Status::Deleting | Status::Creating) {
                             return None;
                         }
                     }

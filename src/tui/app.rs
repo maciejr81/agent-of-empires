@@ -334,6 +334,8 @@ impl App {
             }
         }
 
+        self.home.cleanup_pending_creation();
+
         if let Err(e) = self.home.save() {
             tracing::error!("Failed to save on quit: {}", e);
         }
@@ -396,11 +398,23 @@ impl App {
         // Global keybindings
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                if self.home.is_creating_stub_selected() {
+                    self.home.cancel_creation();
+                    return Ok(());
+                }
+                if self.home.is_creation_pending() && !self.home.has_dialog() {
+                    self.home.show_quit_during_creation_confirm();
+                    return Ok(());
+                }
                 self.should_quit = true;
                 return Ok(());
             }
             (KeyCode::Char('q'), _) => {
                 if !self.home.has_dialog() {
+                    if self.home.is_creation_pending() {
+                        self.home.show_quit_during_creation_confirm();
+                        return Ok(());
+                    }
                     self.should_quit = true;
                     return Ok(());
                 }
