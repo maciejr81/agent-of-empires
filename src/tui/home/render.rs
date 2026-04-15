@@ -165,7 +165,7 @@ impl HomeView {
         }
 
         #[cfg(feature = "serve")]
-        if let Some(dialog) = &self.remote_dialog {
+        if let Some(dialog) = &self.serve_dialog {
             dialog.render(frame, area, theme);
         }
     }
@@ -772,19 +772,28 @@ impl HomeView {
 
         let mut spans: Vec<Span> = Vec::new();
 
-        // Remote-access indicator: shown only when the `aoe serve --remote`
-        // daemon is live. The TUI does not own the daemon, so we probe the
-        // PID file each render. Feature-gated alongside the rest of the
-        // serve-specific code.
+        // Serve indicator: shown only when the `aoe serve` daemon is live.
+        // The TUI does not own the daemon, so we probe the PID file each
+        // render. Mode comes from a PID-keyed cache so we don't read the
+        // serve.mode file from disk on every frame; the cache invalidates
+        // whenever the daemon PID changes (restart / fresh spawn).
         #[cfg(feature = "serve")]
-        if crate::cli::serve::daemon_pid().is_some() {
-            spans.extend([
-                Span::styled(
-                    " \u{25CF} Remote on ",
-                    Style::default().fg(theme.running).bold(),
-                ),
-                Span::styled("│", sep_style),
-            ]);
+        {
+            let mode_label = crate::cli::serve::cached_serve_mode_label();
+            // cached_serve_mode_label() returns None both for "no daemon"
+            // and "daemon but mode unknown", so check the daemon PID to
+            // distinguish — only render the indicator when there's a
+            // daemon, with the mode tag if we have it.
+            if crate::cli::serve::daemon_pid().is_some() {
+                let label = match mode_label {
+                    Some(m) => format!(" \u{25CF} Serving ({}) ", m),
+                    None => " \u{25CF} Serving ".to_string(),
+                };
+                spans.extend([
+                    Span::styled(label, Style::default().fg(theme.running).bold()),
+                    Span::styled("│", sep_style),
+                ]);
+            }
         }
 
         spans.extend([

@@ -425,14 +425,14 @@ impl HomeView {
             return None;
         }
 
-        // Remote-access dialog (serve feature only)
+        // Serve dialog (serve feature only)
         #[cfg(feature = "serve")]
-        if let Some(dialog) = &mut self.remote_dialog {
+        if let Some(dialog) = &mut self.serve_dialog {
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
                 DialogResult::Cancel | DialogResult::Submit(_) => {
                     // Dropping the dialog kills the subprocess via kill_on_drop.
-                    self.remote_dialog = None;
+                    self.serve_dialog = None;
                 }
             }
             return None;
@@ -515,21 +515,21 @@ impl HomeView {
             }
             #[cfg(feature = "serve")]
             KeyCode::Char('R') => {
-                self.remote_dialog = Some(crate::tui::dialogs::RemoteDialog::new());
+                self.serve_dialog = Some(crate::tui::dialogs::ServeDialog::new());
             }
             #[cfg(not(feature = "serve"))]
             KeyCode::Char('R') => {
                 self.info_dialog = Some(InfoDialog::new(
-                    "Remote access unavailable",
+                    "Serve unavailable",
                     "This `aoe` binary was built without the `serve` feature, \
-                     so the web dashboard and Cloudflare Tunnel integration \
-                     are not included.\n\n\
-                     To use remote access from your phone:\n\
+                     so the web dashboard, local network serving, and \
+                     Cloudflare Tunnel integration are not included.\n\n\
+                     To serve to your phone (LAN / Tailscale / tunnel):\n\
                        \u{2022} Install a release build from GitHub Releases, or\n\
                        \u{2022} Build from source with:\n\
                          cargo build --release --features serve\n\n\
                      Once you have a `serve`-enabled binary, press R again to \
-                     open the remote access dialog.",
+                     open the serve dialog.",
                 ));
             }
             KeyCode::Char('t') => {
