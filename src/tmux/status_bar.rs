@@ -97,6 +97,16 @@ pub fn apply_mouse_option(session_name: &str, enabled: bool) -> Result<()> {
     set_session_option(session_name, "mouse", value)
 }
 
+/// Bind Ctrl+G to detach the current tmux client (returns the user to the
+/// aoe session manager). Idempotent: tmux replaces an existing root binding.
+/// We avoid Ctrl+Q because it sits next to Ctrl+K (manager exit), making
+/// accidental detaches likely.
+pub fn ensure_detach_keybinding() {
+    let _ = std::process::Command::new("tmux")
+        .args(["bind-key", "-n", "C-g", "detach-client"])
+        .output();
+}
+
 /// Apply all configured tmux options to a session.
 /// This is a unified entry point that applies status bar styling and mouse settings.
 pub fn apply_all_tmux_options(
@@ -130,6 +140,8 @@ pub fn apply_all_tmux_options(
             tracing::debug!("Failed to apply tmux mouse option: {}", e);
         }
     }
+
+    ensure_detach_keybinding();
 }
 
 /// Session info retrieved from tmux user options.
