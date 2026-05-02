@@ -223,9 +223,11 @@ impl HomeView {
         // Below STACKED_BREAKPOINT (80 cols), put the list above the preview
         // instead of side-by-side. At 80 cols a side-by-side preview is only
         // ~45 cols (with default list_width 35), too cramped for output;
-        // stacking gives the preview the full width.
+        // stacking gives the preview the full width. Users running multiple
+        // narrow terminals at once can opt out via `|` to keep the
+        // side-by-side layout regardless of width.
         let available_width = main_chunks[0].width;
-        if available_width < responsive::STACKED_BREAKPOINT {
+        if available_width < responsive::STACKED_BREAKPOINT && !self.force_side_by_side_layout {
             let main_height = main_chunks[0].height;
             let list_height = responsive::stacked_list_height(main_height);
             let chunks = Layout::default()

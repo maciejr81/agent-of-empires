@@ -148,6 +148,12 @@ pub struct AppStateConfig {
     /// Persisted state of the Shift+A "show only user-active sessions" filter.
     #[serde(default)]
     pub filter_user_active: bool,
+
+    /// When true, the home view always uses the side-by-side (list | preview)
+    /// layout regardless of viewport width, instead of stacking on narrow
+    /// terminals. Toggled with `|`.
+    #[serde(default)]
+    pub force_side_by_side_layout: bool,
 }
 
 /// Session-related configuration defaults

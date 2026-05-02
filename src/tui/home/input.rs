@@ -1075,6 +1075,15 @@ impl HomeView {
                 self.cursor = self.cursor.min(self.flat_items.len().saturating_sub(1));
                 self.update_selected();
             }
+            KeyCode::Char('|') => {
+                self.force_side_by_side_layout = !self.force_side_by_side_layout;
+                if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
+                    config.app_state.force_side_by_side_layout = self.force_side_by_side_layout;
+                    if let Err(e) = save_config(&config) {
+                        tracing::warn!("Failed to save layout override: {}", e);
+                    }
+                }
+            }
             KeyCode::End | KeyCode::Char('G') if !self.flat_items.is_empty() => {
                 self.cursor = self.flat_items.len() - 1;
                 self.update_selected();

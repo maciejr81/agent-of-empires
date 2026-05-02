@@ -195,6 +195,11 @@ pub struct HomeView {
     /// `AppStateConfig.filter_user_active`.
     pub(super) filter_user_active: bool,
 
+    /// When true, the home view always renders side-by-side (list | preview)
+    /// instead of switching to stacked below `responsive::STACKED_BREAKPOINT`.
+    /// Toggled with `|` and persisted in `AppStateConfig`.
+    pub(super) force_side_by_side_layout: bool,
+
     // Tool availability
     pub(super) available_tools: AvailableTools,
 
@@ -327,6 +332,10 @@ impl HomeView {
             .as_ref()
             .map(|c| c.app_state.filter_user_active)
             .unwrap_or(false);
+        let force_side_by_side_layout = user_config
+            .as_ref()
+            .map(|c| c.app_state.force_side_by_side_layout)
+            .unwrap_or(false);
 
         let mut view = Self {
             storages,
@@ -372,6 +381,7 @@ impl HomeView {
             search_matches: Vec::new(),
             search_match_index: 0,
             filter_user_active,
+            force_side_by_side_layout,
             available_tools,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
