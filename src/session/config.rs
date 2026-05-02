@@ -144,6 +144,10 @@ pub struct AppStateConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<GroupByMode>,
+
+    /// Persisted state of the Shift+A "show only user-active sessions" filter.
+    #[serde(default)]
+    pub filter_user_active: bool,
 }
 
 /// Session-related configuration defaults

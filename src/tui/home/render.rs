@@ -594,6 +594,9 @@ impl HomeView {
 
         if let Item::Session { id, .. } = item {
             if let Some(inst) = self.get_instance(id) {
+                if inst.user_active {
+                    line_spans.push(Span::styled(" \u{2605}", Style::default().fg(theme.accent)));
+                }
                 if let Some(ws_info) = &inst.workspace_info {
                     line_spans.push(Span::styled(
                         format!("  {} [{} repos]", ws_info.branch, ws_info.repos.len()),

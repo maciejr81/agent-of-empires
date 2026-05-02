@@ -1052,6 +1052,29 @@ impl HomeView {
             KeyCode::Char('g') => {
                 self.apply_group_by(self.group_by.cycle());
             }
+            KeyCode::Char('a') => {
+                if let Some(id) = self.selected_session.clone() {
+                    self.mutate_instance(&id, |inst| inst.user_active = !inst.user_active);
+                    let _ = self.save();
+                    if self.filter_user_active {
+                        self.flat_items = self.build_flat_items();
+                        self.cursor = self.cursor.min(self.flat_items.len().saturating_sub(1));
+                        self.update_selected();
+                    }
+                }
+            }
+            KeyCode::Char('A') => {
+                self.filter_user_active = !self.filter_user_active;
+                if let Ok(mut config) = load_config().map(|c| c.unwrap_or_default()) {
+                    config.app_state.filter_user_active = self.filter_user_active;
+                    if let Err(e) = save_config(&config) {
+                        tracing::warn!("Failed to save user-active filter: {}", e);
+                    }
+                }
+                self.flat_items = self.build_flat_items();
+                self.cursor = self.cursor.min(self.flat_items.len().saturating_sub(1));
+                self.update_selected();
+            }
             KeyCode::End | KeyCode::Char('G') if !self.flat_items.is_empty() => {
                 self.cursor = self.flat_items.len() - 1;
                 self.update_selected();

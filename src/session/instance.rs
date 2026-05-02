@@ -163,6 +163,11 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_entered_at: Option<DateTime<Utc>>,
 
+    /// User-toggled "active" flag, surfaced in the home list as a star
+    /// marker and used by the Shift+A filter. Persisted with the instance.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_active: bool,
+
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_info: Option<WorktreeInfo>,
@@ -376,6 +381,7 @@ impl Instance {
             created_at: Utc::now(),
             last_accessed_at: None,
             idle_entered_at: None,
+            user_active: false,
             worktree_info: None,
             workspace_info: None,
             sandbox_info: None,

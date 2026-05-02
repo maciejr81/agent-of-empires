@@ -190,6 +190,11 @@ pub struct HomeView {
     pub(super) search_matches: Vec<usize>,
     pub(super) search_match_index: usize,
 
+    /// When true, `build_flat_items` only emits sessions flagged
+    /// `Instance.user_active`. Toggled via Shift+A and persisted in
+    /// `AppStateConfig.filter_user_active`.
+    pub(super) filter_user_active: bool,
+
     // Tool availability
     pub(super) available_tools: AvailableTools,
 
@@ -318,6 +323,10 @@ impl HomeView {
             .as_ref()
             .and_then(|c| c.app_state.group_by)
             .unwrap_or(default_group_by);
+        let filter_user_active = user_config
+            .as_ref()
+            .map(|c| c.app_state.filter_user_active)
+            .unwrap_or(false);
 
         let mut view = Self {
             storages,
@@ -362,6 +371,7 @@ impl HomeView {
             search_query: Input::default(),
             search_matches: Vec::new(),
             search_match_index: 0,
+            filter_user_active,
             available_tools,
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
@@ -1175,10 +1185,11 @@ impl HomeView {
 
     pub(super) fn build_flat_items(&self) -> Vec<Item> {
         if self.group_by == GroupByMode::Project {
-            return self.build_flat_items_by_project();
+            let items = self.build_flat_items_by_project();
+            return self.apply_user_active_filter(items);
         }
 
-        if let Some(profile) = &self.active_profile {
+        let items = if let Some(profile) = &self.active_profile {
             let filtered: Vec<Instance> = self
                 .instances
                 .iter()
@@ -1196,7 +1207,50 @@ impl HomeView {
             }
         } else {
             flatten_tree_all_profiles(&self.instances, &self.group_trees, self.sort_order)
+        };
+        self.apply_user_active_filter(items)
+    }
+
+    /// Drop session rows whose `Instance.user_active` is false and any
+    /// group rows that end up with no remaining session children. Walks
+    /// the flat list in reverse so a group's children have been resolved
+    /// before its `session_count` is recomputed.
+    fn apply_user_active_filter(&self, items: Vec<Item>) -> Vec<Item> {
+        if !self.filter_user_active {
+            return items;
         }
+
+        let mut kept: Vec<Item> = items
+            .into_iter()
+            .filter(|item| match item {
+                Item::Session { id, .. } => self
+                    .instance_map
+                    .get(id)
+                    .is_some_and(|inst| inst.user_active),
+                Item::Group { .. } => true,
+            })
+            .collect();
+
+        // Remove groups that lost all their session descendants. A group's
+        // descendants are the contiguous run of items with strictly greater
+        // depth that follow it in the flat list.
+        let mut i = 0;
+        while i < kept.len() {
+            if let Item::Group { depth, .. } = &kept[i] {
+                let group_depth = *depth;
+                let has_session = kept[i + 1..]
+                    .iter()
+                    .take_while(|item| item.depth() > group_depth)
+                    .any(|item| matches!(item, Item::Session { .. }));
+                if !has_session {
+                    kept.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        kept
     }
 
     fn build_flat_items_by_project(&self) -> Vec<Item> {
