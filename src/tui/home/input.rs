@@ -661,20 +661,55 @@ impl HomeView {
                 } else if !self.available_tools.any_available() {
                     self.show_no_agents();
                 } else {
+                    // Prefill folder + group from the selected session (or
+                    // selected group). Empties stay empty so the dialog falls
+                    // back to user input. Mirrors Shift+N's prefill, but
+                    // applies on plain `n` so the common case (new session in
+                    // the current project/group) is one keypress.
+                    let prefill_path = self
+                        .selected_session
+                        .as_ref()
+                        .and_then(|id| self.get_instance(id))
+                        .map(|inst| {
+                            inst.worktree_info
+                                .as_ref()
+                                .map(|wt| wt.main_repo_path.clone())
+                                .unwrap_or_else(|| inst.project_path.clone())
+                        });
+                    let prefill_group = self
+                        .selected_session
+                        .as_ref()
+                        .and_then(|id| self.get_instance(id))
+                        .and_then(|inst| {
+                            if inst.group_path.is_empty() {
+                                None
+                            } else {
+                                Some(inst.group_path.clone())
+                            }
+                        })
+                        .or_else(|| self.selected_group.clone());
+
                     let existing_groups: Vec<String> =
                         self.all_groups().iter().map(|g| g.path.clone()).collect();
                     let current_profile = self
-                        .active_profile
-                        .clone()
+                        .profile_for_cursor(self.cursor)
+                        .or_else(|| self.active_profile.clone())
                         .unwrap_or_else(|| "default".to_string());
                     let profiles =
                         list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
-                    self.new_dialog = Some(NewSessionDialog::new(
+                    let mut dialog = NewSessionDialog::new(
                         self.available_tools.clone(),
                         existing_groups,
                         &current_profile,
                         profiles,
-                    ));
+                    );
+                    if let Some(path) = prefill_path {
+                        dialog.set_path(path);
+                    }
+                    if let Some(group) = prefill_group {
+                        dialog.set_group(group);
+                    }
+                    self.new_dialog = Some(dialog);
                 }
             }
             KeyCode::Char('N') => {
