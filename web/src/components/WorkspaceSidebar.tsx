@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import type { Workspace, RepoGroup, SessionStatus } from "../lib/types";
+import { MULTI_REPO_GROUP_ID } from "../hooks/useRepoGroups";
 import {
   STATUS_DOT_CLASS,
   getStatusTextClass,
@@ -38,6 +39,7 @@ interface Props {
   onNew: () => void;
   onCreateSession: (repoPath: string) => void;
   onSettings: () => void;
+  onProjects: () => void;
   onDeleteSession?: (workspaceId: string) => void;
   readOnly?: boolean;
 }
@@ -342,6 +344,21 @@ const SessionRow = memo(function SessionRow({
                 {subtitle}
               </span>
             )}
+            {firstSession && (firstSession.workspace_repos?.length ?? 0) > 1 && (
+              <span
+                className="mt-0.5 flex flex-wrap gap-1 text-[10px] font-mono text-text-dim"
+                title={firstSession.workspace_repos.map((r) => r.source_path).join("\n")}
+              >
+                {firstSession.workspace_repos.map((r) => (
+                  <span
+                    key={r.source_path}
+                    className="px-1 py-px bg-surface-800/50 border border-surface-700/40 rounded text-text-secondary"
+                  >
+                    {r.name}
+                  </span>
+                ))}
+              </span>
+            )}
           </div>
         </div>
       </Link>
@@ -493,6 +510,7 @@ export function WorkspaceSidebar({
   onNew,
   onCreateSession,
   onSettings,
+  onProjects,
   onDeleteSession,
   readOnly,
 }: Props) {
@@ -662,7 +680,11 @@ export function WorkspaceSidebar({
                   group={{ ...group, collapsed: !showExpanded }}
                   hasActiveChild={!showExpanded && hasActiveChild}
                   onClick={() => !q && onToggleRepo(group.id)}
-                  onNewSession={() => onCreateSession(group.repoPath)}
+                  onNewSession={() =>
+                    group.id === MULTI_REPO_GROUP_ID
+                      ? onNew()
+                      : onCreateSession(group.repoPath)
+                  }
                 />
                 {showExpanded &&
                   group.workspaces.map((ws) => (
@@ -689,7 +711,26 @@ export function WorkspaceSidebar({
           )}
         </div>
 
-        <div className="border-t border-surface-700/20 p-2">
+        <div className="border-t border-surface-700/20 p-2 flex items-center gap-1">
+          <button
+            onClick={onProjects}
+            className="w-8 h-8 flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-surface-800/50 cursor-pointer rounded-md transition-colors"
+            title="Projects"
+            aria-label="Projects"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+          </button>
           <button
             onClick={onSettings}
             className="w-8 h-8 flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-surface-800/50 cursor-pointer rounded-md transition-colors"

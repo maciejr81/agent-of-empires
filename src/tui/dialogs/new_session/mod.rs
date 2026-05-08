@@ -162,6 +162,13 @@ pub struct NewSessionDialog {
     pub(super) existing_groups: Vec<String>,
     pub(super) group_picker: ListPicker,
     pub(super) branch_picker: ListPicker,
+    /// Picker over registered projects (global ∪ profile). Activated from
+    /// the workspace_repos list with Ctrl+R; selection appends the
+    /// project's path to `workspace_repos`.
+    pub(super) projects_picker: ListPicker,
+    /// Snapshot of registered projects at picker activation, parallel to
+    /// the picker's display list, used to map the chosen name back to a path.
+    pub(super) available_projects: Vec<crate::session::Project>,
     pub(super) dir_picker: DirPicker,
     pub(super) error_message: Option<String>,
     pub(super) show_help: bool,
@@ -377,6 +384,8 @@ impl NewSessionDialog {
             existing_groups,
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
+            projects_picker: ListPicker::new("Add registered project"),
+            available_projects: Vec::new(),
             dir_picker: DirPicker::new(),
             worktree_enabled,
             worktree_branch: Input::default(),
@@ -617,6 +626,8 @@ impl NewSessionDialog {
             existing_groups: Vec::new(),
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
+            projects_picker: ListPicker::new("Add registered project"),
+            available_projects: Vec::new(),
             dir_picker: DirPicker::new(),
             worktree_enabled: config.worktree.enabled,
             worktree_branch: Input::default(),
@@ -677,6 +688,8 @@ impl NewSessionDialog {
             existing_groups: Vec::new(),
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
+            projects_picker: ListPicker::new("Add registered project"),
+            available_projects: Vec::new(),
             dir_picker: DirPicker::new(),
             worktree_enabled: false,
             worktree_branch: Input::default(),
@@ -725,7 +738,16 @@ impl NewSessionDialog {
     pub fn set_error(&mut self, error: String) {
         self.error_message = Some(error);
     }
+}
 
+/// Label shown in the registered-projects picker. Includes scope so users
+/// can disambiguate when the same name exists across scopes (rare; the
+/// merger dedupes by path, not name).
+fn project_picker_label(p: &crate::session::Project) -> String {
+    format!("{} [{}]  {}", p.name, p.scope.as_str(), p.path)
+}
+
+impl NewSessionDialog {
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
         // When loading, only allow Esc to cancel
         if self.loading {
@@ -1135,6 +1157,46 @@ impl NewSessionDialog {
         }
     }
 
+    /// Resolve a label chosen from the project picker back to the underlying
+    /// project entry and append its path to the workspace repos list.
+    fn apply_picked_project(&mut self, value: &str) {
+        if let Some(project) = self
+            .available_projects
+            .iter()
+            .find(|p| project_picker_label(p) == value)
+        {
+            if !self.workspace_repos.contains(&project.path) {
+                self.workspace_repos.push(project.path.clone());
+            }
+            self.workspace_repos_expanded = true;
+            self.workspace_repo_selected_index = self.workspace_repos.len().saturating_sub(1);
+        }
+    }
+
+    /// Build and activate the registered-projects picker (Ctrl+R on the
+    /// extra-repos field). Filters out the primary repo and any paths already
+    /// in the workspace_repos list to avoid the builder's duplicate-name guard.
+    fn open_projects_picker(&mut self) {
+        let primary = self.path.value().trim().to_string();
+        let merged = crate::session::projects::load_merged(&self.profile).unwrap_or_default();
+        self.available_projects = merged
+            .into_iter()
+            .filter(|p| p.path != primary && !self.workspace_repos.contains(&p.path))
+            .collect();
+        if self.available_projects.is_empty() {
+            self.error_message = Some(
+                "No registered projects available. Add one with `aoe project add <path>`.".into(),
+            );
+        } else {
+            let labels: Vec<String> = self
+                .available_projects
+                .iter()
+                .map(project_picker_label)
+                .collect();
+            self.projects_picker.activate(labels);
+        }
+    }
+
     /// Handle key events when in worktree configuration mode.
     fn handle_worktree_config_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
         // Worktree config fields: 0=name, 1=new_branch checkbox, 2=extra_repos list
@@ -1146,6 +1208,13 @@ impl NewSessionDialog {
         if self.branch_picker.is_active() {
             if let ListPickerResult::Selected(value) = self.branch_picker.handle_key(key) {
                 self.worktree_branch = Input::new(value);
+            }
+            return DialogResult::Continue;
+        }
+
+        if self.projects_picker.is_active() {
+            if let ListPickerResult::Selected(value) = self.projects_picker.handle_key(key) {
+                self.apply_picked_project(&value);
             }
             return DialogResult::Continue;
         }
@@ -1175,6 +1244,15 @@ impl NewSessionDialog {
                         self.branch_picker.activate(branches);
                     }
                 }
+                DialogResult::Continue
+            }
+            // Ctrl+R on extra_repos field opens the registered-projects picker.
+            // Selection appends the project's path to the workspace_repos list.
+            KeyCode::Char('r')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.worktree_config_focused_field == WT_EXTRA_REPOS =>
+            {
+                self.open_projects_picker();
                 DialogResult::Continue
             }
             KeyCode::Enter if self.worktree_config_focused_field == WT_EXTRA_REPOS => {
