@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RepoBase, RichDiffFile } from "../../lib/types";
+import type { BranchInfo } from "../../lib/api";
 import { buildDiffTree, type DiffTreeNode } from "../../lib/diffTree";
 import { useWebSettings } from "../../hooks/useWebSettings";
+import { fetchBranches, setSessionDiffBase } from "../../lib/api";
 
 interface Props {
   files: RichDiffFile[];
@@ -14,6 +16,19 @@ interface Props {
   selectedRepoName: string | undefined;
   loading: boolean;
   onSelectFile: (path: string, repoName?: string) => void;
+  /** Session id used by the `vs <ref>` chip popover to PATCH the
+   *  per-session base-branch override. `null` hides the picker. */
+  sessionId?: string | null;
+  /** Repo path used to populate the branch typeahead in the picker.
+   *  `null` hides the picker. */
+  repoPath?: string | null;
+  /** Current persisted override (also reflected in `perRepoBases[0].base_branch`
+   *  on next refetch). Used to label the "Reset" affordance and to
+   *  pre-fill the typeahead. */
+  baseBranchOverride?: string | null;
+  /** Called after a successful PATCH so the parent re-fetches the diff
+   *  against the new base. */
+  onBaseBranchChanged?: () => void;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -114,6 +129,8 @@ function TreeView({
   onToggleDir,
   focusedIndex,
   onFocusIndex,
+  indentOffset = 0,
+  repoNameForSelect,
 }: {
   nodes: DiffTreeNode[];
   selectedPath: string | null;
@@ -122,6 +139,14 @@ function TreeView({
   onToggleDir: (dirPath: string) => void;
   focusedIndex: number;
   onFocusIndex: (i: number) => void;
+  /** Extra left padding in px applied to every row. Multi-repo passes
+   *  a non-zero value so tree rows nest visually under the repo
+   *  header. */
+  indentOffset?: number;
+  /** When set, file rows pass this as the `repoName` argument to
+   *  `onSelectFile`. Multi-repo uses it so the right pane knows which
+   *  repo the file belongs to; single-repo leaves it `undefined`. */
+  repoNameForSelect?: string;
 }) {
   return (
     <>
@@ -140,7 +165,7 @@ function TreeView({
               onMouseEnter={() => onFocusIndex(i)}
               aria-expanded={!node.collapsed}
               className={`w-full text-left py-1.5 cursor-pointer transition-colors flex items-center gap-1.5 text-text-muted hover:bg-surface-800/50 ${focusRing}`}
-              style={{ paddingLeft: `${node.depth * 16 + 12}px`, paddingRight: 12 }}
+              style={{ paddingLeft: `${node.depth * 16 + 12 + indentOffset}px`, paddingRight: 12 }}
             >
               <svg
                 className={`w-3 h-3 shrink-0 text-text-dim transition-transform duration-75 ${
@@ -178,14 +203,16 @@ function TreeView({
           <button
             key={`${file.repo_name ?? ""}::${file.path}`}
             data-index={i}
-            onClick={() => onSelectFile(file.path, file.repo_name)}
+            onClick={() =>
+              onSelectFile(file.path, repoNameForSelect ?? file.repo_name)
+            }
             onMouseEnter={() => onFocusIndex(i)}
             className={`w-full text-left py-1.5 cursor-pointer transition-colors flex items-center gap-2 ${
               isSelected
                 ? "bg-surface-850 text-text-primary"
                 : "text-text-secondary hover:bg-surface-800/50"
             } ${focusRing}`}
-            style={{ paddingLeft: `${node.depth * 16 + 12}px`, paddingRight: 12 }}
+            style={{ paddingLeft: `${node.depth * 16 + 12 + indentOffset}px`, paddingRight: 12 }}
           >
             <span
               className={`shrink-0 font-mono text-[12px] w-3 text-center ${STATUS_COLORS[file.status] ?? "text-text-muted"}`}
@@ -224,6 +251,10 @@ export function DiffFileList({
   selectedRepoName,
   loading,
   onSelectFile,
+  sessionId,
+  repoPath,
+  baseBranchOverride,
+  onBaseBranchChanged,
 }: Props) {
   const isMultiRepo = perRepoBases.length > 1;
   // Multi-repo workspaces compose multiple `(name, base_branch)` pairs;
@@ -371,6 +402,14 @@ export function DiffFileList({
             <span className="font-mono text-[10px] px-1.5 py-px rounded bg-surface-800 text-text-muted">
               {perRepoBases.length} repos
             </span>
+          ) : sessionId && repoPath ? (
+            <BasePicker
+              sessionId={sessionId}
+              repoPath={repoPath}
+              currentBase={singleBaseBranch}
+              hasOverride={Boolean(baseBranchOverride)}
+              onChanged={onBaseBranchChanged}
+            />
           ) : (
             <span className="font-mono text-[10px] px-1.5 py-px rounded bg-surface-800 text-text-muted">
               vs {singleBaseBranch}
@@ -388,10 +427,10 @@ export function DiffFileList({
               </span>
             </>
           )}
-          {/* View mode toggle. Hidden in multi-repo mode where each
-              repo gets its own collapsible group; the tree view has no
-              clean place for the workspace-vs-repo nesting yet. */}
-          {files.length > 0 && !isMultiRepo && (
+          {/* View mode toggle. In multi-repo mode the tree/flat choice
+              applies inside each per-repo group; the repo-header row
+              itself is always the top-level container regardless. */}
+          {files.length > 0 && (
             <button
               onClick={toggleViewMode}
               className="ml-auto shrink-0 p-1 rounded text-text-dim hover:text-text-muted hover:bg-surface-800/50 transition-colors cursor-pointer"
@@ -455,6 +494,9 @@ export function DiffFileList({
             collapsedRepos={collapsedRepos}
             onToggleRepo={toggleRepo}
             onSelectFile={onSelectFile}
+            viewMode={viewMode}
+            collapsedDirs={collapsedDirs}
+            onToggleDir={toggleDir}
           />
         ) : viewMode === "tree" ? (
           <TreeView
@@ -481,8 +523,10 @@ export function DiffFileList({
   );
 }
 
-const STATUS_COLORS_FILE = STATUS_COLORS;
-const STATUS_LETTERS_FILE = STATUS_LETTERS;
+// Sentinel separating the repo namespace from the dir path inside the
+// shared `collapsedDirs` set. NUL is impossible in a real file path
+// and avoids collisions with directory names that contain `::`.
+const REPO_NS_SEP = "\u0000";
 
 function MultiRepoGroups({
   perRepoBases,
@@ -492,6 +536,9 @@ function MultiRepoGroups({
   collapsedRepos,
   onToggleRepo,
   onSelectFile,
+  viewMode,
+  collapsedDirs,
+  onToggleDir,
 }: {
   perRepoBases: RepoBase[];
   filesByRepo: Map<string, RichDiffFile[]>;
@@ -500,6 +547,9 @@ function MultiRepoGroups({
   collapsedRepos: Set<string>;
   onToggleRepo: (name: string) => void;
   onSelectFile: (path: string, repoName?: string) => void;
+  viewMode: "flat" | "tree";
+  collapsedDirs: Set<string>;
+  onToggleDir: (dirPath: string) => void;
 }) {
   return (
     <>
@@ -545,52 +595,284 @@ function MultiRepoGroups({
                 No changes in this repo.
               </div>
             )}
-            {!collapsed &&
-              repoFiles.map((file) => {
-                const parts = file.path.split("/");
-                const fileName = parts.pop() || file.path;
-                const dirPath = parts.length > 0 ? parts.join("/") + "/" : "";
-                const isSelected =
-                  file.path === selectedPath &&
-                  file.repo_name === selectedRepoName;
-                return (
-                  <button
-                    key={`${file.repo_name ?? ""}::${file.path}`}
-                    type="button"
-                    onClick={() => onSelectFile(file.path, file.repo_name)}
-                    className={`w-full text-left px-6 py-1.5 cursor-pointer transition-colors flex items-center gap-2 ${
-                      isSelected
-                        ? "bg-surface-850 text-text-primary"
-                        : "text-text-secondary hover:bg-surface-800/50"
-                    }`}
-                  >
-                    <span
-                      className={`shrink-0 font-mono text-[12px] w-3 text-center ${STATUS_COLORS_FILE[file.status] ?? "text-text-muted"}`}
-                    >
-                      {STATUS_LETTERS_FILE[file.status] ?? "?"}
-                    </span>
-                    <span className="truncate min-w-0 flex-1">
-                      {dirPath && (
-                        <span className="font-mono text-[11px] text-text-dim">
-                          {dirPath}
-                        </span>
-                      )}
-                      <span className="font-mono text-[12px]">{fileName}</span>
-                    </span>
-                    <span className="shrink-0 font-mono text-[11px] flex items-center gap-1">
-                      {file.additions > 0 && (
-                        <span className="text-status-running">+{file.additions}</span>
-                      )}
-                      {file.deletions > 0 && (
-                        <span className="text-status-error">-{file.deletions}</span>
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
+            {!collapsed && repoFiles.length > 0 && (
+              <RepoBody
+                repoName={name}
+                files={repoFiles}
+                viewMode={viewMode}
+                selectedPath={selectedPath}
+                selectedRepoName={selectedRepoName}
+                collapsedDirs={collapsedDirs}
+                onToggleDir={onToggleDir}
+                onSelectFile={onSelectFile}
+              />
+            )}
           </div>
         );
       })}
     </>
+  );
+}
+
+function RepoBody({
+  repoName,
+  files,
+  viewMode,
+  selectedPath,
+  selectedRepoName,
+  collapsedDirs,
+  onToggleDir,
+  onSelectFile,
+}: {
+  repoName: string;
+  files: RichDiffFile[];
+  viewMode: "flat" | "tree";
+  selectedPath: string | null;
+  selectedRepoName: string | undefined;
+  collapsedDirs: Set<string>;
+  onToggleDir: (dirPath: string) => void;
+  onSelectFile: (path: string, repoName?: string) => void;
+}) {
+  const ns = `${repoName}${REPO_NS_SEP}`;
+  // Per-repo collapsed set: strip the namespace prefix so the tree
+  // builder sees bare dir paths. The toggle path round-trips through
+  // the shared set so persistence keeps working unchanged.
+  const localCollapsed = useMemo(() => {
+    const out = new Set<string>();
+    for (const k of collapsedDirs) {
+      if (k.startsWith(ns)) out.add(k.slice(ns.length));
+    }
+    return out;
+  }, [collapsedDirs, ns]);
+  const localToggle = useCallback(
+    (p: string) => onToggleDir(`${ns}${p}`),
+    [onToggleDir, ns],
+  );
+  const treeNodes = useMemo(
+    () => (viewMode === "tree" ? buildDiffTree(files, localCollapsed) : []),
+    [viewMode, files, localCollapsed],
+  );
+
+  if (viewMode === "tree") {
+    return (
+      <TreeView
+        nodes={treeNodes}
+        selectedPath={selectedPath}
+        selectedRepoName={selectedRepoName}
+        onSelectFile={onSelectFile}
+        onToggleDir={localToggle}
+        focusedIndex={-1}
+        onFocusIndex={() => {}}
+        indentOffset={12}
+        repoNameForSelect={repoName || undefined}
+      />
+    );
+  }
+  return (
+    <>
+      {files.map((file) => {
+        const parts = file.path.split("/");
+        const fileName = parts.pop() || file.path;
+        const dirPath = parts.length > 0 ? parts.join("/") + "/" : "";
+        const isSelected =
+          file.path === selectedPath && file.repo_name === selectedRepoName;
+        return (
+          <button
+            key={`${file.repo_name ?? ""}::${file.path}`}
+            type="button"
+            onClick={() => onSelectFile(file.path, file.repo_name)}
+            className={`w-full text-left px-6 py-1.5 cursor-pointer transition-colors flex items-center gap-2 ${
+              isSelected
+                ? "bg-surface-850 text-text-primary"
+                : "text-text-secondary hover:bg-surface-800/50"
+            }`}
+          >
+            <span
+              className={`shrink-0 font-mono text-[12px] w-3 text-center ${STATUS_COLORS[file.status] ?? "text-text-muted"}`}
+            >
+              {STATUS_LETTERS[file.status] ?? "?"}
+            </span>
+            <span className="truncate min-w-0 flex-1">
+              {dirPath && (
+                <span className="font-mono text-[11px] text-text-dim">
+                  {dirPath}
+                </span>
+              )}
+              <span className="font-mono text-[12px]">{fileName}</span>
+            </span>
+            <span className="shrink-0 font-mono text-[11px] flex items-center gap-1">
+              {file.additions > 0 && (
+                <span className="text-status-running">+{file.additions}</span>
+              )}
+              {file.deletions > 0 && (
+                <span className="text-status-error">-{file.deletions}</span>
+              )}
+            </span>
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+interface BasePickerProps {
+  sessionId: string;
+  repoPath: string;
+  currentBase: string;
+  hasOverride: boolean;
+  onChanged?: () => void;
+}
+
+/// Clickable chip + typeahead popover for the per-session diff base.
+/// Persists via `PATCH /api/sessions/{id}/diff-base`; the parent
+/// triggers a diff refetch on success. See #970.
+function BasePicker({
+  sessionId,
+  repoPath,
+  currentBase,
+  hasOverride,
+  onChanged,
+}: BasePickerProps) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [branches, setBranches] = useState<BranchInfo[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetchBranches(repoPath, true).then((rows) => {
+      if (!cancelled) setBranches(rows ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, repoPath]);
+
+  // Close the popover on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const onDocPointer = (e: PointerEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onDocPointer);
+    return () => document.removeEventListener("pointerdown", onDocPointer);
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const suggestions = (branches ?? [])
+    .filter((b) => !q || b.name.toLowerCase().includes(q))
+    .slice(0, 8);
+
+  const apply = async (value: string | null) => {
+    setBusy(true);
+    const ok = await setSessionDiffBase(sessionId, value);
+    setBusy(false);
+    if (ok) {
+      setOpen(false);
+      setQuery("");
+      onChanged?.();
+    }
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={`Change diff base (current: ${currentBase})`}
+        title="Change diff base"
+        className={`font-mono text-[10px] px-1.5 py-px rounded cursor-pointer transition-colors ${
+          hasOverride
+            ? "bg-brand-600/15 text-brand-500 hover:bg-brand-600/25"
+            : "bg-surface-800 text-text-muted hover:bg-surface-700"
+        }`}
+      >
+        vs {currentBase}
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-20 mt-1 w-64 bg-surface-900 border border-surface-700/60 rounded-lg shadow-lg p-2">
+          <input
+            type="text"
+            autoFocus
+            value={query}
+            placeholder="Search branches..."
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setHighlightIdx(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setHighlightIdx((i) => Math.min(i + 1, suggestions.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setHighlightIdx((i) => Math.max(i - 1, 0));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                const pick = suggestions[highlightIdx];
+                if (pick) void apply(pick.name);
+                else if (query.trim()) void apply(query.trim());
+              } else if (e.key === "Escape") {
+                setOpen(false);
+              }
+            }}
+            disabled={busy}
+            className="w-full bg-surface-950 border border-surface-700/60 rounded px-2 py-1.5 text-xs font-mono text-text-primary placeholder:text-text-dim focus:border-brand-600 focus:outline-none"
+          />
+          {hasOverride && (
+            <button
+              type="button"
+              onClick={() => void apply(null)}
+              disabled={busy}
+              className="mt-1.5 w-full text-left px-2 py-1 rounded text-[11px] text-text-dim hover:bg-surface-800 hover:text-text-secondary cursor-pointer"
+            >
+              ↺ Reset to auto-detected
+            </button>
+          )}
+          <ul
+            role="listbox"
+            aria-label="Branch suggestions"
+            className="mt-1 max-h-56 overflow-y-auto"
+          >
+            {suggestions.length === 0 && (
+              <li className="px-2 py-1 text-[11px] text-text-dim italic">
+                {branches === null ? "Loading branches..." : "No matches."}
+              </li>
+            )}
+            {suggestions.map((b, i) => (
+              <li
+                key={`${b.name}-${b.remote_only ? "r" : "l"}`}
+                role="option"
+                aria-selected={i === highlightIdx}
+                onMouseEnter={() => setHighlightIdx(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  void apply(b.name);
+                }}
+                className={`flex items-center justify-between gap-2 px-2 py-1 text-xs font-mono cursor-pointer rounded ${
+                  i === highlightIdx
+                    ? "bg-surface-800 text-text-primary"
+                    : "text-text-secondary"
+                }`}
+              >
+                <span className="truncate">{b.name}</span>
+                <span className="text-[10px] uppercase tracking-wider text-text-dim shrink-0">
+                  {b.is_current ? "current" : b.remote_only ? "remote" : "local"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
