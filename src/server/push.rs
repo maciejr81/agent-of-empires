@@ -876,16 +876,21 @@ pub async fn subscribe(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthenticatedTokenHash>,
     headers: HeaderMap,
-    Json(body): Json<SubscribeBody>,
-) -> Result<StatusCode, StatusCode> {
+    body: Result<Json<SubscribeBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<StatusCode, axum::response::Response> {
+    use axum::response::IntoResponse;
     if state.read_only {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
-    let push = state.push.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let Json(body) = body.map_err(|rej| rej.into_response())?;
+    let push = state
+        .push
+        .as_ref()
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
 
     // Minimal shape validation so we don't store garbage.
     if body.endpoint.is_empty() || body.keys.p256dh.is_empty() || body.keys.auth.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
 
     let user_agent = headers
@@ -909,7 +914,7 @@ pub async fn subscribe(
     push.store
         .upsert(sub)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -949,26 +954,31 @@ pub fn extract_request_origin(headers: &HeaderMap) -> Option<String> {
 pub async fn unsubscribe(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthenticatedTokenHash>,
-    Json(body): Json<EndpointBody>,
-) -> Result<StatusCode, StatusCode> {
+    body: Result<Json<EndpointBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<StatusCode, axum::response::Response> {
+    use axum::response::IntoResponse;
     if state.read_only {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
-    let push = state.push.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let Json(body) = body.map_err(|rej| rej.into_response())?;
+    let push = state
+        .push
+        .as_ref()
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
     if body.endpoint.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
     let removed = push
         .store
         .remove_if_owner(&body.endpoint, &auth.0)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     if removed {
         Ok(StatusCode::NO_CONTENT)
     } else {
         // Either the endpoint doesn't exist or belongs to another owner.
         // Return 403 rather than 204 so clients know the call did nothing.
-        Err(StatusCode::FORBIDDEN)
+        Err(StatusCode::FORBIDDEN.into_response())
     }
 }
 
@@ -980,14 +990,19 @@ pub async fn unsubscribe(
 pub async fn test(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthenticatedTokenHash>,
-    Json(body): Json<EndpointBody>,
-) -> Result<Json<TestResult>, StatusCode> {
+    body: Result<Json<EndpointBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<TestResult>, axum::response::Response> {
+    use axum::response::IntoResponse;
     if state.read_only {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
-    let push = state.push.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let Json(body) = body.map_err(|rej| rej.into_response())?;
+    let push = state
+        .push
+        .as_ref()
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
     if body.endpoint.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
 
     // Confirm ownership before doing anything. Reject cross-owner test
@@ -999,14 +1014,14 @@ pub async fn test(
         .into_iter()
         .find(|s| s.endpoint == body.endpoint);
     let Some(subscription) = owned else {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     };
 
     let client = match super::push_send::build_client() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(target: "http.middleware", error = %e, "push: failed to build reqwest client");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
 
@@ -1018,7 +1033,7 @@ pub async fn test(
             endpoint = %subscription.endpoint,
             "test push skipped: subscription has no origin, ask user to re-subscribe (#1188)"
         );
-        return Err(StatusCode::CONFLICT);
+        return Err(StatusCode::CONFLICT.into_response());
     };
     let payload = super::push_send::PushPayload {
         title: "Agent of Empires".to_string(),
