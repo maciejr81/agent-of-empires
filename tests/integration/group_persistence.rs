@@ -16,7 +16,11 @@ fn test_create_group_and_persist() -> Result<()> {
     let mut group_tree = GroupTree::new_with_groups(&instances, &[]);
     group_tree.create_group("work");
 
-    storage.commit(&instances, &group_tree)?;
+    storage.update(|i, g| {
+        *i = instances.to_vec();
+        *g = group_tree.get_all_groups();
+        Ok(())
+    })?;
 
     let (loaded_instances, loaded_groups) = storage.load_with_groups()?;
     let reloaded_tree = GroupTree::new_with_groups(&loaded_instances, &loaded_groups);
@@ -35,7 +39,11 @@ fn test_nested_group_persistence() -> Result<()> {
     let mut group_tree = GroupTree::new_with_groups(&instances, &[]);
     group_tree.create_group("work/frontend");
 
-    storage.commit(&instances, &group_tree)?;
+    storage.update(|i, g| {
+        *i = instances.to_vec();
+        *g = group_tree.get_all_groups();
+        Ok(())
+    })?;
 
     let (loaded_instances, loaded_groups) = storage.load_with_groups()?;
     let reloaded_tree = GroupTree::new_with_groups(&loaded_instances, &loaded_groups);
@@ -56,7 +64,11 @@ fn test_delete_group_persists() -> Result<()> {
     // Create and save a group
     let mut group_tree = GroupTree::new_with_groups(&instances, &[]);
     group_tree.create_group("temporary");
-    storage.commit(&instances, &group_tree)?;
+    storage.update(|i, g| {
+        *i = instances.to_vec();
+        *g = group_tree.get_all_groups();
+        Ok(())
+    })?;
 
     // Reload, delete, save again
     let (loaded_instances, loaded_groups) = storage.load_with_groups()?;
@@ -64,7 +76,11 @@ fn test_delete_group_persists() -> Result<()> {
     assert!(reloaded_tree.group_exists("temporary"));
 
     reloaded_tree.delete_group("temporary");
-    storage.commit(&loaded_instances, &reloaded_tree)?;
+    storage.update(|i, g| {
+        *i = loaded_instances.to_vec();
+        *g = reloaded_tree.get_all_groups();
+        Ok(())
+    })?;
 
     // Reload again and verify deletion
     let (final_instances, final_groups) = storage.load_with_groups()?;
@@ -86,13 +102,21 @@ fn test_move_session_between_groups() -> Result<()> {
     let mut group_tree = GroupTree::new_with_groups(&[instance.clone()], &[]);
     group_tree.create_group("group-a");
     group_tree.create_group("group-b");
-    storage.commit(&[instance.clone()], &group_tree)?;
+    storage.update(|i, g| {
+        *i = [instance.clone()].to_vec();
+        *g = group_tree.get_all_groups();
+        Ok(())
+    })?;
 
     // Move the session to group-b
     let (mut loaded, loaded_groups) = storage.load_with_groups()?;
     loaded[0].group_path = "group-b".to_string();
     let new_tree = GroupTree::new_with_groups(&loaded, &loaded_groups);
-    storage.commit(&loaded, &new_tree)?;
+    storage.update(|i, g| {
+        *i = loaded.to_vec();
+        *g = new_tree.get_all_groups();
+        Ok(())
+    })?;
 
     // Reload and verify
     let (final_instances, final_groups) = storage.load_with_groups()?;
@@ -119,7 +143,11 @@ fn test_group_with_sessions_round_trip() -> Result<()> {
 
     let instances = vec![inst1, inst2, inst3];
     let group_tree = GroupTree::new_with_groups(&instances, &[]);
-    storage.commit(&instances, &group_tree)?;
+    storage.update(|i, g| {
+        *i = instances.to_vec();
+        *g = group_tree.get_all_groups();
+        Ok(())
+    })?;
 
     let (loaded, loaded_groups) = storage.load_with_groups()?;
     assert_eq!(loaded.len(), 3);
@@ -151,7 +179,11 @@ fn test_empty_groups_persist() -> Result<()> {
     let mut group_tree = GroupTree::new_with_groups(&instances, &[]);
     group_tree.create_group("empty-group");
     group_tree.create_group("another-empty");
-    storage.commit(&instances, &group_tree)?;
+    storage.update(|i, g| {
+        *i = instances.to_vec();
+        *g = group_tree.get_all_groups();
+        Ok(())
+    })?;
 
     let (loaded_instances, loaded_groups) = storage.load_with_groups()?;
     assert!(loaded_instances.is_empty());

@@ -284,7 +284,11 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     }
 
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
+    // Phase 1 (unlocked): pre-flight read of the current persisted state to
+    // resolve `--parent`, generate a non-colliding title, and make
+    // best-effort duplicate / parent decisions before any side effects.
+    // Final duplicate enforcement happens under the flock in phase 3.
+    let (instances, _groups) = storage.load_with_groups()?;
 
     // Resolve parent session if specified
     let mut group_path = args.group.clone();
@@ -307,6 +311,12 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                 "Session already exists with same title and path: {}",
                 trimmed_title
             );
+            cleanup_partial_session(
+                &path,
+                worktree_info_opt.as_ref(),
+                workspace_info_opt.as_ref(),
+                args.create_branch,
+            );
             return Ok(());
         }
         trimmed_title.to_string()
@@ -316,6 +326,12 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
             println!(
                 "Session already exists with same title and path: {}",
                 branch_title
+            );
+            cleanup_partial_session(
+                &path,
+                worktree_info_opt.as_ref(),
+                workspace_info_opt.as_ref(),
+                args.create_branch,
             );
             return Ok(());
         }
@@ -599,41 +615,56 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     })();
 
     if let Err(e) = hook_result {
-        // Clean up worktree if we created one
-        if let Some(ref wt_info) = instance.worktree_info {
-            if wt_info.managed_by_aoe {
-                if let Ok(git_wt) =
-                    crate::git::GitWorktree::new(std::path::PathBuf::from(&wt_info.main_repo_path))
-                {
-                    let _ = git_wt.remove_worktree(&path, false);
-                }
-            }
-        }
-        // Clean up workspace worktrees if we created them
-        if let Some(ref ws_info) = instance.workspace_info {
-            for repo in &ws_info.repos {
-                if repo.managed_by_aoe {
-                    let wt_path = PathBuf::from(&repo.worktree_path);
-                    let main_repo = PathBuf::from(&repo.main_repo_path);
-                    if let Ok(git_wt) = crate::git::GitWorktree::new(main_repo) {
-                        let _ = git_wt.remove_worktree(&wt_path, false);
-                    }
-                }
-            }
-            let _ = std::fs::remove_dir_all(&ws_info.workspace_dir);
-        }
+        cleanup_partial_session(
+            &path,
+            instance.worktree_info.as_ref(),
+            instance.workspace_info.as_ref(),
+            args.create_branch,
+        );
         return Err(e);
     }
 
-    instances.push(instance.clone());
-
-    // Rebuild group tree
-    let mut group_tree = GroupTree::new_with_groups(&instances, &groups);
-    if !instance.group_path.is_empty() {
-        group_tree.create_group(&instance.group_path);
+    let persist_result = storage.update(|all_instances, groups| {
+        if is_duplicate_session(
+            all_instances,
+            &instance.title,
+            instance.project_path.as_str(),
+        ) {
+            return Ok(false);
+        }
+        all_instances.push(instance.clone());
+        if !instance.group_path.is_empty() {
+            let mut group_tree = GroupTree::new_with_groups(all_instances, groups);
+            group_tree.create_group(&instance.group_path);
+            *groups = group_tree.get_all_groups();
+        }
+        Ok(true)
+    });
+    match persist_result {
+        Ok(true) => {}
+        Ok(false) => {
+            println!(
+                "Session already exists with same title and path: {}",
+                instance.title
+            );
+            cleanup_partial_session(
+                &path,
+                instance.worktree_info.as_ref(),
+                instance.workspace_info.as_ref(),
+                args.create_branch,
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            cleanup_partial_session(
+                &path,
+                instance.worktree_info.as_ref(),
+                instance.workspace_info.as_ref(),
+                args.create_branch,
+            );
+            return Err(e);
+        }
     }
-
-    storage.commit(&instances, &group_tree)?;
 
     println!("✓ Added session: {}", final_title);
     println!("  Profile: {}", storage.profile());
@@ -683,15 +714,55 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
             );
         }
     } else if args.launch {
-        let idx = instances
-            .iter()
-            .position(|i| i.id == instance.id)
-            .expect("just added instance");
-        instances[idx].start_with_size(crate::terminal::get_size())?;
-        storage.commit(&instances, &group_tree)?;
+        // Persist Status::Error + last_error on launch failure rather than
+        // cleanup_partial_session: row is committed; surface as broken.
+        let id = instance.id.clone();
+        match instance.start_with_size(crate::terminal::get_size()) {
+            Ok(()) => {
+                let landed = storage.update(|all_instances, _groups| {
+                    if let Some(stored) = all_instances.iter_mut().find(|i| i.id == id) {
+                        stored.merge_post_start(&instance);
+                        Ok(true)
+                    } else {
+                        tracing::warn!(
+                            target: "session.cli",
+                            session_id = %id,
+                            "session row removed by peer between insert and launch-merge; tmux session is now orphan"
+                        );
+                        Ok(false)
+                    }
+                })?;
+                if !landed {
+                    anyhow::bail!(
+                        "Session {} was removed by another process before launch could land; tmux session is now orphan",
+                        instance.title
+                    );
+                }
 
-        let tmux_session = crate::tmux::Session::new(&instance.id, &instance.title)?;
-        tmux_session.attach()?;
+                let tmux_session = crate::tmux::Session::new(&instance.id, &instance.title)?;
+                tmux_session.attach()?;
+            }
+            Err(e) => {
+                if let Err(rollback_err) = storage.update(|all_instances, _groups| {
+                    if let Some(stored) = all_instances.iter_mut().find(|i| i.id == id) {
+                        stored.status = crate::session::Status::Error;
+                    }
+                    Ok(())
+                }) {
+                    tracing::error!(
+                        target: "session.store",
+                        "Failed to persist Status::Error rollback for {}: {}; row may show stale Starting status",
+                        id,
+                        rollback_err
+                    );
+                }
+                eprintln!(
+                    "Warning: launch failed: {}. Retry with: aoe session start {}",
+                    e, final_title
+                );
+                return Err(e);
+            }
+        }
     } else {
         println!();
         println!("Next steps:");
@@ -700,6 +771,37 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cleanup_partial_session(
+    path: &std::path::Path,
+    worktree_info: Option<&crate::session::WorktreeInfo>,
+    workspace_info: Option<&crate::session::WorkspaceInfo>,
+    created_branch: bool,
+) {
+    if let Some(wt) = worktree_info {
+        if wt.managed_by_aoe {
+            if let Ok(git_wt) = crate::git::GitWorktree::new(PathBuf::from(&wt.main_repo_path)) {
+                let _ = git_wt.remove_worktree(path, false);
+                if created_branch {
+                    let _ = git_wt.delete_branch(&wt.branch);
+                }
+            }
+        }
+    }
+    if let Some(ws) = workspace_info {
+        for repo in &ws.repos {
+            if repo.managed_by_aoe {
+                if let Ok(git_wt) =
+                    crate::git::GitWorktree::new(PathBuf::from(&repo.main_repo_path))
+                {
+                    let _ =
+                        git_wt.remove_worktree(std::path::Path::new(&repo.worktree_path), false);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&ws.workspace_dir);
+    }
 }
 
 pub fn is_duplicate_session(instances: &[Instance], title: &str, path: &str) -> bool {

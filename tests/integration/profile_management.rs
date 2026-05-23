@@ -122,7 +122,11 @@ fn test_profile_session_isolation() -> Result<()> {
     let storage_a = Storage::new("alpha")?;
     let instance = Instance::new("Alpha Session", "/path/alpha");
     let seeded = vec![instance];
-    storage_a.commit(&seeded, &GroupTree::new_with_groups(&seeded, &[]))?;
+    storage_a.update(|i, g| {
+        *i = seeded.to_vec();
+        *g = GroupTree::new_with_groups(&seeded, &[]).get_all_groups();
+        Ok(())
+    })?;
 
     // Load from profile beta - should be empty
     let storage_b = Storage::new("beta")?;
@@ -147,7 +151,11 @@ fn test_rename_profile() -> Result<()> {
     let storage = Storage::new("old_name")?;
     let instance = Instance::new("Test Session", "/path/test");
     let seeded = vec![instance];
-    storage.commit(&seeded, &GroupTree::new_with_groups(&seeded, &[]))?;
+    storage.update(|i, g| {
+        *i = seeded.to_vec();
+        *g = GroupTree::new_with_groups(&seeded, &[]).get_all_groups();
+        Ok(())
+    })?;
 
     rename_profile("old_name", "new_name")?;
 

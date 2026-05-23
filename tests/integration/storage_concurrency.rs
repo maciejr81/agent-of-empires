@@ -1,6 +1,7 @@
-//! Integration tests for the in-process per-profile lock added in #1175.
+//! Integration tests for the two-layer per-profile lock (in-process mutex
+//! + cross-process flock).
 //!
-//! These exercise the public locked API (`Storage::update`, `commit`,
+//! These exercise the public locked API (`Storage::update`,
 //! `update_workspace_ordering`) end-to-end from outside the crate, the same
 //! surface a third-party consumer would see.
 
@@ -17,7 +18,11 @@ fn test_concurrent_updates_no_lost_updates() -> Result<()> {
     let _temp = setup_temp_home();
 
     let storage = Storage::new("default")?;
-    storage.commit(&[], &GroupTree::new_with_groups(&[], &[]))?;
+    storage.update(|i, g| {
+        *i = [].to_vec();
+        *g = GroupTree::new_with_groups(&[], &[]).get_all_groups();
+        Ok(())
+    })?;
 
     let n_threads = 16usize;
     let start = Arc::new(Barrier::new(n_threads));
@@ -90,7 +95,11 @@ fn test_update_with_groups_and_instances_round_trip() -> Result<()> {
     let _temp = setup_temp_home();
 
     let storage = Storage::new("default")?;
-    storage.commit(&[], &GroupTree::new_with_groups(&[], &[]))?;
+    storage.update(|i, g| {
+        *i = [].to_vec();
+        *g = GroupTree::new_with_groups(&[], &[]).get_all_groups();
+        Ok(())
+    })?;
 
     storage.update(|instances, groups| {
         let mut inst = Instance::new("project-a", "/tmp/a");
@@ -105,60 +114,6 @@ fn test_update_with_groups_and_instances_round_trip() -> Result<()> {
     assert_eq!(loaded_instances[0].group_path, "work/clients");
     assert_eq!(loaded_groups.len(), 1);
     assert_eq!(loaded_groups[0].name, "clients");
-    Ok(())
-}
-
-#[test]
-#[serial]
-fn test_commit_overwrites_concurrent_update_by_design() -> Result<()> {
-    let _temp = setup_temp_home();
-
-    let storage = Storage::new("default")?;
-    storage.commit(&[], &GroupTree::new_with_groups(&[], &[]))?;
-
-    let entered = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let entered_clone = Arc::clone(&entered);
-    let release_clone = Arc::clone(&release);
-
-    let updater = std::thread::spawn(move || {
-        let storage = Storage::new("default").unwrap();
-        storage
-            .update(|instances, _| {
-                instances.push(Instance::new("from-update", "/tmp/u"));
-                entered_clone.wait();
-                release_clone.wait();
-                Ok(())
-            })
-            .unwrap();
-    });
-
-    entered.wait();
-    let committer = std::thread::spawn(|| {
-        let storage = Storage::new("default").unwrap();
-        storage
-            .commit(
-                &[Instance::new("from-commit", "/tmp/c")],
-                &GroupTree::new_with_groups(&[], &[]),
-            )
-            .unwrap();
-    });
-
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    assert!(
-        !committer.is_finished(),
-        "commit should be blocked by update lock"
-    );
-    release.wait();
-    updater.join().unwrap();
-    committer.join().unwrap();
-
-    let loaded = storage.load()?;
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(
-        loaded[0].title, "from-commit",
-        "commit semantics: last writer wins after the lock is released"
-    );
     Ok(())
 }
 
@@ -178,7 +133,11 @@ fn test_concurrent_per_field_updates_no_clobber() -> Result<()> {
 
     let storage = Storage::new("default")?;
     let seed = vec![Instance::new("session", "/tmp/session")];
-    storage.commit(&seed, &GroupTree::new_with_groups(&seed, &[]))?;
+    storage.update(|i, g| {
+        *i = seed.to_vec();
+        *g = GroupTree::new_with_groups(&seed, &[]).get_all_groups();
+        Ok(())
+    })?;
     let target_id = storage.load()?[0].id.clone();
 
     let n_iterations = 16usize;
@@ -247,7 +206,11 @@ fn test_update_propagates_disk_write_failure() -> Result<()> {
 
     let storage = Storage::new("default")?;
     let seed = vec![Instance::new("session", "/tmp/s")];
-    storage.commit(&seed, &GroupTree::new_with_groups(&seed, &[]))?;
+    storage.update(|i, g| {
+        *i = seed.to_vec();
+        *g = GroupTree::new_with_groups(&seed, &[]).get_all_groups();
+        Ok(())
+    })?;
 
     let profile_dir = agent_of_empires::session::get_profile_dir("default")?;
 
@@ -288,5 +251,311 @@ fn test_update_propagates_disk_write_failure() -> Result<()> {
         1,
         "disk state must be unchanged when atomic_write fails"
     );
+    Ok(())
+}
+
+// Cross-process tests: spawn real `aoe` subprocesses that each go through
+// the full Storage::update path (in-process Mutex + cross-process flock +
+// atomic_write). They validate that two independent OS processes
+// (e.g. TUI + daemon, or two CLI invocations, or daemon + a CLI invocation)
+// cannot lose each other's updates when racing on the same profile.
+
+fn aoe_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_aoe")
+}
+
+fn spawn_favorite(aoe: &str, home: &std::path::Path, id: &str) -> std::process::Child {
+    let mut cmd = std::process::Command::new(aoe);
+    cmd.args(["session", "favorite", id])
+        .env("HOME", home)
+        .env_remove("AGENT_OF_EMPIRES_DEBUG");
+    #[cfg(target_os = "linux")]
+    cmd.env("XDG_CONFIG_HOME", home.join(".config"));
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("aoe binary failed to spawn")
+}
+
+#[test]
+#[serial]
+fn test_cross_process_no_lost_updates() -> Result<()> {
+    let temp = setup_temp_home();
+    let home = temp.path().to_path_buf();
+
+    let storage = Storage::new("default")?;
+    let n = 8usize;
+    storage.update(|instances, _groups| {
+        for i in 0..n {
+            instances.push(Instance::new(
+                &format!("session-{i}"),
+                &format!("/tmp/aoe-test-{i}"),
+            ));
+        }
+        Ok(())
+    })?;
+    let ids: Vec<String> = storage.load()?.iter().map(|i| i.id.clone()).collect();
+    assert_eq!(ids.len(), n);
+
+    let aoe = aoe_bin();
+    let children: Vec<_> = ids
+        .iter()
+        .map(|id| spawn_favorite(aoe, &home, id))
+        .collect();
+    for mut child in children {
+        let status = child.wait()?;
+        assert!(
+            status.success(),
+            "child `aoe session favorite` exited with {status:?}"
+        );
+    }
+
+    let final_state = storage.load()?;
+    let favorited = final_state
+        .iter()
+        .filter(|i| i.favorited_at.is_some())
+        .count();
+    assert_eq!(
+        favorited, n,
+        "every concurrent CLI favorite must persist (no lost updates)"
+    );
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn test_cross_process_blocking_acquire() -> Result<()> {
+    let temp = setup_temp_home();
+    let home = temp.path().to_path_buf();
+
+    let storage = Storage::new("default")?;
+    storage.update(|instances, _groups| {
+        instances.push(Instance::new("blocked", "/tmp/aoe-test-blocked"));
+        Ok(())
+    })?;
+    let id = storage.load()?[0].id.clone();
+
+    let hold = std::time::Duration::from_millis(800);
+    let parent_held = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let parent_held_in_thread = parent_held.clone();
+
+    let storage_clone = Storage::new("default")?;
+    let parent_handle = std::thread::spawn(move || {
+        storage_clone
+            .update(|_instances, _groups| {
+                parent_held_in_thread.wait();
+                std::thread::sleep(hold);
+                Ok(())
+            })
+            .unwrap();
+    });
+
+    parent_held.wait();
+    let started = std::time::Instant::now();
+    let mut child = spawn_favorite(aoe_bin(), &home, &id);
+    let status = child.wait()?;
+    let elapsed = started.elapsed();
+    parent_handle.join().unwrap();
+
+    assert!(status.success(), "child exit status: {status:?}");
+    assert!(
+        elapsed >= hold - std::time::Duration::from_millis(200),
+        "child should have blocked on the flock for ~{:?}, observed {:?}",
+        hold,
+        elapsed
+    );
+
+    let final_state = storage.load()?;
+    assert!(
+        final_state
+            .iter()
+            .any(|i| i.id == id && i.favorited_at.is_some()),
+        "child's favorite must land after parent releases"
+    );
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn test_lock_released_on_panic_unwind() -> Result<()> {
+    let temp = setup_temp_home();
+    let home = temp.path().to_path_buf();
+
+    let storage = Storage::new("default")?;
+    storage.update(|instances, _groups| {
+        instances.push(Instance::new("victim", "/tmp/aoe-test-victim"));
+        Ok(())
+    })?;
+    let id = storage.load()?[0].id.clone();
+
+    let storage_clone = Storage::new("default")?;
+    let parent_handle = std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<()> = storage_clone.update(|_, _| -> Result<()> {
+                panic!("simulated abort while holding the lock");
+            });
+        }));
+    });
+    parent_handle.join().expect("thread joined");
+
+    let started = std::time::Instant::now();
+    let mut child = spawn_favorite(aoe_bin(), &home, &id);
+    let status = child.wait()?;
+    let elapsed = started.elapsed();
+
+    assert!(status.success());
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "lock must be released after holder unwinds; observed {:?}",
+        elapsed
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_cross_process_lock_released_on_child_kill() -> Result<()> {
+    use fs2::FileExt;
+    use nix::sys::signal::{self, Signal};
+    use nix::sys::wait::waitpid;
+    use nix::unistd::{fork, ForkResult, Pid};
+
+    let _temp = setup_temp_home();
+
+    let storage = Storage::new("default")?;
+    storage.update(|insts, _| {
+        insts.push(Instance::new("victim-kill", "/tmp/aoe-test-victim-kill"));
+        Ok(())
+    })?;
+
+    let lock_path = agent_of_empires::session::get_profile_dir("default")?.join(".storage.lock");
+    let path_c =
+        std::ffi::CString::new(lock_path.to_str().expect("utf8 path")).expect("path has no NUL");
+
+    // SAFETY: between fork() and _exit() the child only calls
+    // async-signal-safe libc routines (open, flock, pause, _exit). Cargo
+    // test runs each test on a worker thread, so the post-fork process
+    // is multithreaded; non-async-signal-safe code (allocator, std::fs)
+    // would be UB here.
+    let child = match unsafe { fork() }? {
+        ForkResult::Parent { child } => child,
+        ForkResult::Child => unsafe {
+            let fd = nix::libc::open(
+                path_c.as_ptr(),
+                nix::libc::O_RDWR | nix::libc::O_CREAT,
+                0o600,
+            );
+            if fd < 0 {
+                nix::libc::_exit(2);
+            }
+            if nix::libc::flock(fd, nix::libc::LOCK_EX) != 0 {
+                nix::libc::_exit(3);
+            }
+            nix::libc::pause();
+            nix::libc::_exit(0);
+        },
+    };
+
+    struct ChildGuard(Pid);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = signal::kill(self.0, Signal::SIGKILL);
+            let _ = waitpid(self.0, None);
+        }
+    }
+    let _g = ChildGuard(child);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        if FileExt::try_lock_exclusive(&probe).is_err() {
+            break;
+        }
+        let _ = FileExt::unlock(&probe);
+        drop(probe);
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("child did not acquire flock within deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    signal::kill(child, Signal::SIGKILL)?;
+    waitpid(child, None)?;
+
+    let started = std::time::Instant::now();
+    storage.update(|_, _| Ok(()))?;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "lock must release after SIGKILL; observed {:?}",
+        started.elapsed()
+    );
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn test_cross_process_independent_profiles_do_not_serialise() -> Result<()> {
+    let temp = setup_temp_home();
+    let home = temp.path().to_path_buf();
+
+    let s_a = Storage::new("profile-a")?;
+    let s_b = Storage::new("profile-b")?;
+    s_a.update(|insts, _| {
+        insts.push(Instance::new("a-1", "/tmp/aoe-test-a"));
+        Ok(())
+    })?;
+    s_b.update(|insts, _| {
+        insts.push(Instance::new("b-1", "/tmp/aoe-test-b"));
+        Ok(())
+    })?;
+    let id_a = s_a.load()?[0].id.clone();
+    let id_b = s_b.load()?[0].id.clone();
+
+    let hold = std::time::Duration::from_millis(500);
+    let storage_clone = Storage::new("profile-a")?;
+    let parent_held = Arc::new(Barrier::new(2));
+    let parent_held_inner = parent_held.clone();
+    let parent_handle = std::thread::spawn(move || {
+        storage_clone
+            .update(|_, _| {
+                parent_held_inner.wait();
+                std::thread::sleep(hold);
+                Ok(())
+            })
+            .unwrap();
+    });
+
+    parent_held.wait();
+
+    // Cross-profile children must NOT be serialised by profile-a's flock.
+    let aoe = aoe_bin();
+    let mut cmd_b = std::process::Command::new(aoe);
+    cmd_b
+        .args(["session", "favorite", "--profile", "profile-b", &id_b])
+        .env("HOME", &home);
+    #[cfg(target_os = "linux")]
+    cmd_b.env("XDG_CONFIG_HOME", home.join(".config"));
+    let started = std::time::Instant::now();
+    let status = cmd_b
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    let elapsed = started.elapsed();
+
+    parent_handle.join().unwrap();
+    assert!(status.success(), "profile-b favorite failed: {status:?}");
+    assert!(
+        elapsed < hold,
+        "profile-b must not block on profile-a's flock; observed {:?} >= {:?}",
+        elapsed,
+        hold
+    );
+    let _ = id_a;
     Ok(())
 }

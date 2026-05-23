@@ -3,6 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use std::collections::HashSet;
 
 use crate::session::{GroupTree, StartOutcome, Storage};
 
@@ -245,104 +246,83 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
 
 async fn favorite_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
-
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
+    let title = storage.update(|instances, _groups| {
+        super::patch_instance(instances, &args.identifier, |inst| {
+            inst.favorite();
+            Ok(inst.title.clone())
         })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
-
-    instances[idx].favorite();
-    let title = instances[idx].title.clone();
-
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
-
+    })?;
     println!("Favorited: {}", title);
     Ok(())
 }
 
 async fn unfavorite_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
-
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
+    let title = storage.update(|instances, _groups| {
+        super::patch_instance(instances, &args.identifier, |inst| {
+            inst.unfavorite();
+            Ok(inst.title.clone())
         })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
-
-    instances[idx].unfavorite();
-    let title = instances[idx].title.clone();
-
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
-
+    })?;
     println!("Unfavorited: {}", title);
     Ok(())
 }
 
 async fn archive_session(profile: &str, args: ArchiveArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
 
-    let id = super::resolve_session(&args.identifier, &instances)?
-        .id
-        .clone();
-    let idx = instances
-        .iter()
-        .position(|i| i.id == id)
-        .expect("resolve_session returned an id that is no longer in instances");
+    // Phase 1 (unlocked): resolve identifier.
+    let (instances, _groups) = storage.load_with_groups()?;
+    let inst = super::resolve_session(&args.identifier, &instances)?;
+    let id = inst.id.clone();
+    let title = inst.title.clone();
+    let inst = inst.clone();
 
+    // Phase 2 (unlocked): tmux work; Storage::update closures must stay CPU-only.
     if !args.no_kill {
-        if let Err(e) = instances[idx].kill() {
+        if let Err(e) = inst.kill() {
             eprintln!("Warning: failed to kill tmux session: {}", e);
         }
     }
 
-    instances[idx].archive();
-    let title = instances[idx].title.clone();
-
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
-
-    println!("Archived: {}", title);
-    Ok(())
+    // Phase 3 (locked, fast): set archived_at by id.
+    let landed = storage.update(|instances, _groups| {
+        if let Some(stored) = instances.iter_mut().find(|i| i.id == id) {
+            stored.archive();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })?;
+    if landed {
+        println!("Archived: {}", title);
+        Ok(())
+    } else {
+        bail!(
+            "Session {} was removed by another process before archive could land",
+            title
+        );
+    }
 }
 
 async fn unarchive_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
-
-    let id = super::resolve_session(&args.identifier, &instances)?
-        .id
-        .clone();
-    let idx = instances
-        .iter()
-        .position(|i| i.id == id)
-        .expect("resolve_session returned an id that is no longer in instances");
-
-    instances[idx].unarchive();
-    let title = instances[idx].title.clone();
-
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
-
+    let title = storage.update(|instances, _groups| {
+        let id = super::resolve_session(&args.identifier, instances)?
+            .id
+            .clone();
+        let inst = instances
+            .iter_mut()
+            .find(|i| i.id == id)
+            .expect("resolve_session returned an id that is no longer in instances");
+        inst.unarchive();
+        Ok(inst.title.clone())
+    })?;
     println!("Unarchived: {}", title);
     Ok(())
 }
 
 async fn snooze_session(profile: &str, args: SnoozeArgs) -> Result<()> {
-    let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
-
     let config = crate::session::profile_config::resolve_config(profile)?;
 
     // `--minutes` overrides the profile default; otherwise use the
@@ -355,71 +335,70 @@ async fn snooze_session(profile: &str, args: SnoozeArgs) -> Result<()> {
     crate::session::validate_snooze_duration(raw_minutes).map_err(|e| anyhow::anyhow!("{}", e))?;
     let minutes = raw_minutes as u32;
 
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
+    let storage = Storage::new(profile)?;
+    let title = storage.update(|instances, _groups| {
+        super::patch_instance(instances, &args.identifier, |inst| {
+            inst.snooze(minutes);
+            Ok(inst.title.clone())
         })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
-
-    instances[idx].snooze(minutes);
-    let title = instances[idx].title.clone();
-
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
-
+    })?;
     println!("Snoozed for {}m: {}", minutes, title);
     Ok(())
 }
 
 async fn unsnooze_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
-
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
+    let title = storage.update(|instances, _groups| {
+        super::patch_instance(instances, &args.identifier, |inst| {
+            inst.unsnooze();
+            Ok(inst.title.clone())
         })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
-
-    instances[idx].unsnooze();
-    let title = instances[idx].title.clone();
-
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
-
+    })?;
     println!("Woke: {}", title);
     Ok(())
 }
 
 async fn start_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
 
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
-        })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
-
+    // Phase 1 (unlocked): snapshot the target by identifier, rehydrate
+    // `source_profile` so config resolution honors the right profile.
     // `source_profile` is runtime-only (skip_serializing) so storage-loaded
-    // instances always come back blank; rehydrate it from the storage profile
-    // so start-time config resolution honors the right profile's overrides.
-    instances[idx].source_profile = profile.to_string();
-    bail_if_cockpit(&instances[idx], "start")?;
-    instances[idx].start_with_size(crate::terminal::get_size())?;
-    let title = instances[idx].title.clone();
+    // instances always come back blank.
+    let (instances, _groups) = storage.load_with_groups()?;
+    let inst = super::resolve_session(&args.identifier, &instances)?;
+    bail_if_cockpit(inst, "start")?;
+    let mut working = inst.clone();
+    working.source_profile = profile.to_string();
 
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
+    // Phase 2 (unlocked): tmux work happens outside the cross-process flock
+    // so a slow agent startup does not block peer mutators on the same
+    // profile (daemon poller, sibling CLI invocations).
+    working.start_with_size(crate::terminal::get_size())?;
+    let title = working.title.clone();
+    let id = working.id.clone();
+
+    // Phase 3 (locked, fast): merge the post-start instance back by id, so
+    // any concurrent mutation to OTHER sessions during phase 2 is preserved.
+    let landed = storage.update(|instances, _groups| {
+        if let Some(stored) = instances.iter_mut().find(|i| i.id == id) {
+            stored.merge_post_start(&working);
+            Ok(true)
+        } else {
+            tracing::warn!(
+                target: "session.cli",
+                session_id = %id,
+                "session row removed by peer between phase 1 and phase 3 of start; tmux session is now orphan"
+            );
+            Ok(false)
+        }
+    })?;
+    if !landed {
+        bail!(
+            "Session {} was removed by another process before start could land; tmux session is now orphan",
+            title
+        );
+    }
 
     println!("✓ Started session: {}", title);
     Ok(())
@@ -455,8 +434,10 @@ fn bail_if_cockpit(_inst: &crate::session::Instance, _verb: &str) -> Result<()> 
 
 async fn stop_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
 
+    // Phase 1 (unlocked): resolve identifier, do tmux/container shutdown.
+    // Loaded snapshot is read-only here; the persistence happens in phase 2.
+    let (instances, _groups) = storage.load_with_groups()?;
     let inst = super::resolve_session(&args.identifier, &instances)?;
     bail_if_cockpit(inst, "stop")?;
     let session_id = inst.id.clone();
@@ -475,12 +456,23 @@ async fn stop_session(profile: &str, args: SessionIdArgs) -> Result<()> {
 
     inst.stop()?;
 
-    // Persist Stopped status to disk so it survives TUI restarts
-    if let Some(stored) = instances.iter_mut().find(|i| i.id == session_id) {
-        stored.status = crate::session::Status::Stopped;
+    // Phase 2 (locked): persist Stopped status by id so it survives TUI
+    // restarts. Field-level merge preserves any concurrent mutation that
+    // landed between phase 1 and phase 2.
+    let landed = storage.update(|instances, _groups| {
+        if let Some(stored) = instances.iter_mut().find(|i| i.id == session_id) {
+            stored.status = crate::session::Status::Stopped;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })?;
+    if !landed {
+        bail!(
+            "Session {} was removed by another process before stop could land",
+            title
+        );
     }
-    let group_tree = crate::session::GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
 
     if had_container {
         println!("✓ Stopped session and container: {}", title);
@@ -503,8 +495,11 @@ async fn restart_session_dispatch(profile: &str, args: RestartArgs) -> Result<()
 
 async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
 
+    // Phase 1 (unlocked): snapshot the targets. We don't hold the flock
+    // across the parallel restart fan-out below; phase 3 re-loads under
+    // the lock and merges by id.
+    let (instances, _groups) = storage.load_with_groups()?;
     let target_ids = pick_targets_for_restart_all(&instances);
     if target_ids.is_empty() {
         println!("No sessions to restart in profile '{}'.", profile);
@@ -515,30 +510,29 @@ async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
     let size = crate::terminal::get_size();
     let parallel = parallel.max(1);
 
-    // Clone each target into its worker; we'll write the (mutated) copy back
-    // by index after the worker returns. Workers never touch the shared Vec.
-    // `source_profile` is runtime-only (skip_serializing) so storage-loaded
-    // instances always come back blank; rehydrate it from the storage profile
-    // so start-time config resolution honors the right profile's overrides
-    // (sandbox.environment, on_launch hooks, etc.).
-    let mut targets: Vec<(usize, crate::session::Instance)> = Vec::with_capacity(total);
+    // Clone each target into its worker. `source_profile` is runtime-only
+    // (skip_serializing) so storage-loaded instances always come back
+    // blank; rehydrate it from the storage profile so start-time config
+    // resolution honors the right profile's overrides (sandbox.environment,
+    // on_launch hooks, etc.).
+    let mut targets: Vec<crate::session::Instance> = Vec::with_capacity(total);
     for id in &target_ids {
-        if let Some(idx) = instances.iter().position(|i| &i.id == id) {
-            let mut clone = instances[idx].clone();
+        if let Some(inst) = instances.iter().find(|i| &i.id == id) {
+            let mut clone = inst.clone();
             clone.source_profile = profile.to_string();
-            targets.push((idx, clone));
+            targets.push(clone);
         }
     }
 
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(parallel));
     let mut join_set: tokio::task::JoinSet<(
-        usize,
         String,
         Option<crate::session::Instance>,
         Result<StartOutcome>,
     )> = tokio::task::JoinSet::new();
 
-    for (idx, mut inst) in targets {
+    // Phase 2 (unlocked): parallel tmux restarts.
+    for mut inst in targets {
         let permit_sem = semaphore.clone();
         join_set.spawn(async move {
             let _permit = permit_sem
@@ -552,9 +546,8 @@ async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
             })
             .await;
             match res {
-                Ok((inst, result)) => (idx, title, Some(inst), result),
+                Ok((inst, result)) => (title, Some(inst), result),
                 Err(join_err) => (
-                    idx,
                     title,
                     None,
                     Err(anyhow::anyhow!("worker panicked: {}", join_err)),
@@ -563,25 +556,55 @@ async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
         });
     }
 
-    let mut succeeded: Vec<(String, Option<String>)> = Vec::new();
+    let mut succeeded: Vec<(String, String, Option<String>)> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
+    let mut restarted: Vec<(crate::session::Instance, Option<String>)> = Vec::new();
     while let Some(joined) = join_set.join_next().await {
-        let (idx, title, inst_opt, result) =
-            joined.expect("JoinSet shouldn't panic on join itself");
+        let (title, inst_opt, result) = joined.expect("JoinSet shouldn't panic on join itself");
+        let stale_sid = match &result {
+            Ok(StartOutcome::Restarted { stale_sid }) => Some(stale_sid.clone()),
+            _ => None,
+        };
+        let id = inst_opt.as_ref().map(|i| i.id.clone()).unwrap_or_default();
         if let Some(inst) = inst_opt {
-            instances[idx] = inst;
+            restarted.push((inst, stale_sid.clone()));
         }
         match result {
-            Ok(StartOutcome::Restarted { stale_sid }) => succeeded.push((title, Some(stale_sid))),
-            Ok(StartOutcome::Resumed | StartOutcome::Fresh) => succeeded.push((title, None)),
+            Ok(StartOutcome::Restarted { stale_sid }) => {
+                succeeded.push((id, title, Some(stale_sid)))
+            }
+            Ok(StartOutcome::Resumed | StartOutcome::Fresh) => succeeded.push((id, title, None)),
             Err(e) => failed.push((title, e.to_string())),
         }
     }
 
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
+    // Phase 3 (locked, fast): merge each restarted instance by id into the
+    // freshly-loaded persisted state. Concurrent mutations to OTHER
+    // sessions during phase 2 (status updates from a parallel daemon
+    // poller, sibling CLI invocations, ...) are preserved because the
+    // closure receives the latest disk state.
+    let orphaned: Vec<(String, String)> = storage.update(|instances, _groups| {
+        let mut orphaned = Vec::new();
+        for (restarted_inst, stale_sid) in restarted {
+            if let Some(stored) = instances.iter_mut().find(|i| i.id == restarted_inst.id) {
+                stored.merge_post_restart(&restarted_inst, stale_sid.as_deref());
+            } else {
+                tracing::warn!(
+                    target: "session.cli",
+                    session_id = %restarted_inst.id,
+                    "session row removed by peer between phase 1 and phase 3 of restart --all; tmux session is now orphan"
+                );
+                orphaned.push((restarted_inst.id.clone(), restarted_inst.title.clone()));
+            }
+        }
+        Ok(orphaned)
+    })?;
 
-    let stale_count = succeeded.iter().filter(|(_, s)| s.is_some()).count();
+    // Sessions can share a title across paths; orphan filter keys on id.
+    let orphaned_ids: HashSet<&String> = orphaned.iter().map(|(id, _)| id).collect();
+    succeeded.retain(|(id, _, _)| !orphaned_ids.contains(id));
+
+    let stale_count = succeeded.iter().filter(|(_, _, s)| s.is_some()).count();
     if stale_count == 0 {
         println!("✓ Restarted {}/{} sessions:", succeeded.len(), total);
     } else {
@@ -592,10 +615,19 @@ async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
             stale_count,
         );
     }
-    for (title, stale) in &succeeded {
+    for (_id, title, stale) in &succeeded {
         match stale {
             Some(sid) => println!("  · {}{}", title, stale_history_suffix(sid)),
             None => println!("  · {}", title),
+        }
+    }
+    if !orphaned.is_empty() {
+        println!(
+            "⚠ {} orphaned (row removed by peer mid-flight; tmux running but unrooted):",
+            orphaned.len()
+        );
+        for (_, title) in &orphaned {
+            println!("  · {}", title);
         }
     }
     if !failed.is_empty() {
@@ -637,26 +669,22 @@ fn pick_targets_for_restart_all(instances: &[crate::session::Instance]) -> Vec<S
 
 async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
 
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
-        })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+    // Phase 1 (unlocked): snapshot the target by identifier and
+    // rehydrate `source_profile` for config resolution.
+    let (instances, _groups) = storage.load_with_groups()?;
+    let inst = super::resolve_session(&args.identifier, &instances)?;
+    bail_if_cockpit(inst, "restart")?;
+    let mut working = inst.clone();
+    working.source_profile = profile.to_string();
 
-    // `source_profile` is runtime-only (skip_serializing) so storage-loaded
-    // instances always come back blank; rehydrate it from the storage profile
-    // so restart-time config resolution honors the right profile's overrides.
-    instances[idx].source_profile = profile.to_string();
-    bail_if_cockpit(&instances[idx], "restart")?;
-    let outcome = instances[idx].restart_with_size(crate::terminal::get_size())?;
-    let title = instances[idx].title.clone();
-    let session_id = instances[idx].id.clone();
-    let tool = instances[idx].tool.clone();
+    // Phase 2 (unlocked): tmux restart, agent boot, optional wake-up
+    // send-keys. Slow; the cross-process flock is not held here so peer
+    // mutators on this profile are not starved.
+    let outcome = working.restart_with_size(crate::terminal::get_size())?;
+    let title = working.title.clone();
+    let session_id = working.id.clone();
+    let tool = working.tool.clone();
 
     // Resolve the configured wake message (global default with per-profile
     // override). Empty string is the documented opt-out: the restart still
@@ -665,6 +693,7 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
         .map(|c| c.session.restart_wake_message.clone())
         .unwrap_or_else(|_| "wake up: pick up what you were doing".to_string());
 
+    let mut wake_succeeded = false;
     if !wake_msg.is_empty() {
         // Restart re-execs the agent at a blank prompt; nudge it back into
         // its prior task. Poll capture-pane for steady-state output instead
@@ -677,9 +706,7 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
             let delay = crate::agents::send_keys_enter_delay(&tool);
             match tmux_session.send_keys_with_delay(&wake_msg, delay) {
                 Ok(()) => {
-                    if let Some(inst) = instances.iter_mut().find(|i| i.id == session_id) {
-                        inst.touch_last_accessed();
-                    }
+                    wake_succeeded = true;
                 }
                 Err(e) => {
                     eprintln!("Warning: failed to send wake-up message: {}", e);
@@ -688,8 +715,34 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
         }
     }
 
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
+    // touch_last_accessed runs on `stored`, not `working`: its fields are
+    // peer-mutable and do not belong in `merge_post_restart`.
+    let stale_sid = match &outcome {
+        StartOutcome::Restarted { stale_sid } => Some(stale_sid.as_str()),
+        StartOutcome::Resumed | StartOutcome::Fresh => None,
+    };
+    let landed = storage.update(|instances, _groups| {
+        if let Some(stored) = instances.iter_mut().find(|i| i.id == session_id) {
+            stored.merge_post_restart(&working, stale_sid);
+            if wake_succeeded {
+                stored.touch_last_accessed();
+            }
+            Ok(true)
+        } else {
+            tracing::warn!(
+                target: "session.cli",
+                session_id = %session_id,
+                "session row removed by peer between phase 1 and phase 3 of restart; tmux session is now orphan"
+            );
+            Ok(false)
+        }
+    })?;
+    if !landed {
+        bail!(
+            "Session {} was removed by another process before restart could land; tmux session is now orphan",
+            title
+        );
+    }
 
     match outcome {
         StartOutcome::Restarted { stale_sid } => {
@@ -902,12 +955,14 @@ async fn rename_session(profile: &str, args: RenameArgs) -> Result<()> {
     }
 
     let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
 
+    // Phase 1 (unlocked): resolve the target id (auto-detect from tmux if
+    // no identifier given) and the old/new title pair so we can do the
+    // tmux rename outside the storage flock.
+    let (instances, _groups) = storage.load_with_groups()?;
     let inst = if let Some(id) = &args.identifier {
         super::resolve_session(id, &instances)?
     } else {
-        // Auto-detect from tmux
         let current_session = std::env::var("TMUX_PANE")
             .ok()
             .and_then(|_| crate::tmux::get_current_session_name());
@@ -930,17 +985,19 @@ async fn rename_session(profile: &str, args: RenameArgs) -> Result<()> {
     let id = inst.id.clone();
     let old_title = inst.title.clone();
 
-    let effective_title = args.title.unwrap_or(old_title.clone());
-    let effective_title = effective_title.trim().to_string();
+    let effective_title = args
+        .title
+        .clone()
+        .unwrap_or_else(|| old_title.clone())
+        .trim()
+        .to_string();
+    let new_group = args.group.as_ref().map(|g| g.trim().to_string());
 
-    let idx = instances
-        .iter()
-        .position(|i| i.id == id)
-        .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-
-    // Rename tmux session if title changed
-    if instances[idx].title != effective_title {
-        let tmux_session = crate::tmux::Session::new(&id, &instances[idx].title)?;
+    // Phase 2 (unlocked): tmux rename if the title changed. Side effect on
+    // the running tmux server, fast but external state, do it outside the
+    // closure.
+    if old_title != effective_title {
+        let tmux_session = crate::tmux::Session::new(&id, &old_title)?;
         if tmux_session.exists() {
             let new_tmux_name = crate::tmux::Session::generate_name(&id, &effective_title);
             if let Err(e) = tmux_session.rename(&new_tmux_name) {
@@ -951,17 +1008,28 @@ async fn rename_session(profile: &str, args: RenameArgs) -> Result<()> {
         }
     }
 
-    instances[idx].title = effective_title.clone();
-
-    if let Some(group) = args.group {
-        instances[idx].group_path = group.trim().to_string();
-    }
-
-    let mut group_tree = GroupTree::new_with_groups(&instances, &groups);
-    if !instances[idx].group_path.is_empty() {
-        group_tree.create_group(&instances[idx].group_path);
-    }
-    storage.commit(&instances, &group_tree)?;
+    // Phase 3 (locked): persist the new title and (optional) new group.
+    // Re-resolve by id under the lock so concurrent mutations to other
+    // sessions are preserved. `create_group` is idempotent and only runs
+    // when the closure actually mutated `group_path`, so `groups.json` is
+    // rewritten only on real group changes (cf. `update`'s diff check).
+    storage.update(|instances, groups| {
+        let inst = instances
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found: {}", id))?;
+        inst.title = effective_title.clone();
+        if let Some(group) = &new_group {
+            inst.group_path = group.clone();
+        }
+        let group_path = inst.group_path.clone();
+        if !group_path.is_empty() {
+            let mut group_tree = GroupTree::new_with_groups(instances, groups);
+            group_tree.create_group(&group_path);
+            *groups = group_tree.get_all_groups();
+        }
+        Ok(())
+    })?;
 
     if old_title != effective_title {
         println!("✓ Renamed session: {} → {}", old_title, effective_title);
@@ -1020,18 +1088,6 @@ async fn current_session(args: CurrentArgs) -> Result<()> {
 }
 
 async fn set_session_id(profile: &str, args: SetSessionIdArgs) -> Result<()> {
-    let storage = Storage::new(profile)?;
-    let (mut instances, groups) = storage.load_with_groups()?;
-
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
-        })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
-
     let new_id = if args.session_id.trim().is_empty() {
         None
     } else {
@@ -1045,17 +1101,18 @@ async fn set_session_id(profile: &str, args: SetSessionIdArgs) -> Result<()> {
         Some(trimmed)
     };
 
-    instances[idx].agent_session_id = new_id.clone();
-    let title = instances[idx].title.clone();
-
-    let group_tree = GroupTree::new_with_groups(&instances, &groups);
-    storage.commit(&instances, &group_tree)?;
+    let storage = Storage::new(profile)?;
+    let (title, tool) = storage.update(|instances, _groups| {
+        super::patch_instance(instances, &args.identifier, |inst| {
+            inst.agent_session_id = new_id.clone();
+            Ok((inst.title.clone(), inst.tool.clone()))
+        })
+    })?;
 
     match new_id {
         Some(ref id) => {
             println!("✓ Set session ID for '{}': {}", title, id);
-            let tool = &instances[idx].tool;
-            if let Some(agent) = crate::agents::get_agent(tool) {
+            if let Some(agent) = crate::agents::get_agent(&tool) {
                 if matches!(
                     agent.resume_strategy,
                     crate::agents::ResumeStrategy::Unsupported
@@ -1076,14 +1133,9 @@ async fn set_base(profile: &str, args: SetBaseArgs) -> Result<()> {
     let storage = Storage::new(profile)?;
     let instances = storage.load()?;
 
-    let idx = instances
-        .iter()
-        .position(|i| {
-            i.id == args.identifier
-                || i.id.starts_with(&args.identifier)
-                || i.title == args.identifier
-        })
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
+    let inst = super::resolve_session(&args.identifier, &instances)?;
+    let id = inst.id.clone();
+    let title = inst.title.clone();
 
     let new_value = if args.clear {
         None
@@ -1092,16 +1144,11 @@ async fn set_base(profile: &str, args: SetBaseArgs) -> Result<()> {
         if trimmed.is_empty() {
             bail!("Branch name is empty. Pass --clear to remove the override.");
         }
-        // Validate the ref against the same resolution chain the diff
-        // resolver uses, so users see a clear error at set-time rather
-        // than a silent fallback when the diff is next computed. For
-        // workspace sessions, validate against the first repo's
-        // worktree (each repo will resolve the ref the same way).
-        let validate_path = instances[idx]
+        let validate_path = inst
             .workspace_info
             .as_ref()
             .and_then(|w| w.repos.first().map(|r| r.worktree_path.clone()))
-            .unwrap_or_else(|| instances[idx].project_path.clone());
+            .unwrap_or_else(|| inst.project_path.clone());
         if let Err(e) =
             crate::git::diff::validate_ref(std::path::Path::new(&validate_path), &trimmed)
         {
@@ -1115,15 +1162,12 @@ async fn set_base(profile: &str, args: SetBaseArgs) -> Result<()> {
         Some(trimmed)
     };
 
-    let title = instances[idx].title.clone();
-    let id_for_save = instances[idx].id.clone();
-
     storage.update(|instances, _groups| {
-        let inst = instances
+        let stored = instances
             .iter_mut()
-            .find(|i| i.id == id_for_save)
+            .find(|i| i.id == id)
             .ok_or_else(|| anyhow::anyhow!("Session not found: {}", args.identifier))?;
-        inst.base_branch_override = new_value.clone();
+        stored.base_branch_override = new_value.clone();
         Ok(())
     })?;
 

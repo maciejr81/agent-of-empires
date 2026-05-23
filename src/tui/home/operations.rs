@@ -193,9 +193,11 @@ impl HomeView {
                     self.storages
                         .insert(target_profile.to_string(), Storage::new(target_profile)?);
                 }
-                self.mutate_instance(&id, |inst| {
-                    inst.source_profile = target_profile.to_string();
-                });
+                let group_path = self
+                    .get_instance(&id)
+                    .map(|i| i.group_path.clone())
+                    .unwrap_or_default();
+                self.move_to_profile(&id, target_profile, group_path)?;
                 self.rebuild_group_trees();
                 // Rebuild the visible row list too; otherwise the row still
                 // renders under the old profile until the next reload, and
@@ -217,13 +219,17 @@ impl HomeView {
         self.mutate_instance(&id, |inst| inst.touch_last_accessed());
         self.save()?;
 
-        // Resolve the wake message via the active profile's config (which
-        // already merges global + profile overrides). Empty string is the
+        // Resolve the wake message via the moved session's profile config
+        // (already merges global + profile overrides). Empty string is the
         // documented opt-out.
         let profile = self
-            .active_profile
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+            .get_instance(&id)
+            .map(|i| i.source_profile.clone())
+            .unwrap_or_else(|| {
+                self.active_profile
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string())
+            });
         let wake_msg = crate::session::resolve_config(&profile)
             .map(|c| c.session.restart_wake_message.clone())
             .unwrap_or_else(|_| "wake up: pick up what you were doing".to_string());
@@ -313,19 +319,17 @@ impl HomeView {
                 })
                 .map(|i| i.id.clone())
                 .collect();
-            for id in &ids_to_clear {
-                self.mutate_instance(id, |inst| inst.group_path = String::new());
-            }
+            self.bulk_apply_user_action(&ids_to_clear, |inst| {
+                inst.group_path = String::new();
+            })?;
 
             self.rebuild_group_trees();
-            // Delete the group only from the owning profile's tree
             if let Some(profile) = &owning_profile {
-                if let Some(tree) = self.group_trees.get_mut(profile) {
-                    tree.delete_group(&group_path);
-                }
+                self.delete_group_in_profile(profile, &group_path);
             } else {
-                for tree in self.group_trees.values_mut() {
-                    tree.delete_group(&group_path);
+                let profiles: Vec<String> = self.group_trees.keys().cloned().collect();
+                for profile in profiles {
+                    self.delete_group_in_profile(&profile, &group_path);
                 }
             }
             self.save()?;
@@ -355,13 +359,13 @@ impl HomeView {
                 .map(|i| i.id.clone())
                 .collect();
 
-            for session_id in sessions_to_delete {
-                self.mutate_instance(&session_id, |inst| {
-                    inst.status = Status::Deleting;
-                    inst.group_path = String::new();
-                });
+            self.bulk_apply_user_action(&sessions_to_delete, |inst| {
+                inst.status = Status::Deleting;
+                inst.group_path = String::new();
+            })?;
 
-                if let Some(inst) = self.get_instance(&session_id) {
+            for session_id in &sessions_to_delete {
+                if let Some(inst) = self.get_instance(session_id) {
                     let delete_worktree = options.delete_worktrees
                         && (inst
                             .worktree_info
@@ -396,12 +400,11 @@ impl HomeView {
             }
 
             if let Some(profile) = &owning_profile {
-                if let Some(tree) = self.group_trees.get_mut(profile) {
-                    tree.delete_group(&group_path);
-                }
+                self.delete_group_in_profile(profile, &group_path);
             } else {
-                for tree in self.group_trees.values_mut() {
-                    tree.delete_group(&group_path);
+                let profiles: Vec<String> = self.group_trees.keys().cloned().collect();
+                for profile in profiles {
+                    self.delete_group_in_profile(&profile, &group_path);
                 }
             }
             self.save()?;
@@ -510,14 +513,11 @@ impl HomeView {
             };
 
             if let Some(tp) = new_profile {
-                self.mutate_instance(id, |inst| {
-                    inst.group_path = new_group_path.clone();
-                    inst.source_profile = tp.to_string();
-                });
+                self.move_to_profile(id, tp, new_group_path.clone())?;
             } else {
-                self.mutate_instance(id, |inst| {
+                self.apply_user_action(id, |inst| {
                     inst.group_path = new_group_path.clone();
-                });
+                })?;
             }
         }
 
@@ -528,15 +528,42 @@ impl HomeView {
             }
         }
 
+        let path_changed = new_path != ctx.old_path;
+        let profile_changed = new_profile.is_some_and(|p| p != ctx.old_profile);
+
+        // Capture old_path and its descendants from the pre-rebuild tree:
+        // rebuild_group_trees below derives groups from instance.group_path,
+        // which the loop above already migrated, so the old paths are about
+        // to disappear from the in-memory tree.
+        let stale_paths: Vec<String> = if path_changed || profile_changed {
+            let prefix = format!("{}/", ctx.old_path);
+            self.group_trees
+                .get(&ctx.old_profile)
+                .map(|tree| {
+                    tree.get_all_groups()
+                        .into_iter()
+                        .map(|g| g.path)
+                        .filter(|p| p == &ctx.old_path || p.starts_with(&prefix))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![ctx.old_path.clone()])
+        } else {
+            Vec::new()
+        };
+
         // Rebuild trees from the updated instance list
         self.rebuild_group_trees();
 
-        // Rename the group node in the source tree so the old path is removed
-        // and the new path is established (including all descendant nodes).
-        if new_path != ctx.old_path {
+        if path_changed {
             if let Some(tree) = self.group_trees.get_mut(&ctx.old_profile) {
                 tree.rename_group(&ctx.old_path, new_path);
             }
+        }
+        if path_changed || profile_changed {
+            self.pending_group_deletions
+                .entry(ctx.old_profile.clone())
+                .or_default()
+                .extend(stale_paths);
         }
 
         // When moving to a different profile, ensure the new path exists in the target tree
@@ -628,10 +655,10 @@ impl HomeView {
 
                     // Update source_profile and save (handles moving between profiles)
                     instance.source_profile = target_profile.to_string();
+                    let new_title = instance.title.clone();
+                    self.move_to_profile(&id, target_profile, instance.group_path.clone())?;
                     self.mutate_instance(&id, |inst| {
-                        inst.title = instance.title.clone();
-                        inst.group_path = instance.group_path.clone();
-                        inst.source_profile = instance.source_profile.clone();
+                        inst.title = new_title;
                     });
 
                     self.rebuild_group_trees();
@@ -667,10 +694,10 @@ impl HomeView {
                 }
             }
 
-            self.mutate_instance(&id, |inst| {
+            self.apply_user_action(&id, |inst| {
                 inst.title = effective_title.clone();
                 inst.group_path = effective_group.clone();
-            });
+            })?;
 
             // Rebuild group trees and create group if needed
             self.rebuild_group_trees();
@@ -714,8 +741,7 @@ impl HomeView {
             }
         };
         if is_snoozed {
-            self.mutate_instance(&id, |inst| inst.unsnooze());
-            self.save()?;
+            self.apply_user_action(&id, |inst| inst.unsnooze())?;
             self.flat_items = self.build_flat_items();
             return Ok(Some(format!("Woke: {}", title)));
         }
@@ -735,12 +761,12 @@ impl HomeView {
         id: &str,
         minutes: u32,
     ) -> anyhow::Result<Option<String>> {
-        let mut title = String::new();
-        self.mutate_instance(id, |inst| {
-            inst.snooze(minutes);
-            title = inst.title.clone();
-        });
-        self.save()?;
+        let title = self
+            .instance_map
+            .get(id)
+            .map(|i| i.title.clone())
+            .unwrap_or_default();
+        self.apply_user_action(id, |inst| inst.snooze(minutes))?;
         self.flat_items = self.build_flat_items();
         if self.sort_order == crate::session::config::SortOrder::Attention {
             self.select_top_attention(None);
@@ -771,11 +797,10 @@ impl HomeView {
             None => return Ok(()),
         };
         if is_fav {
-            self.mutate_instance(&id, |inst| inst.unfavorite());
+            self.apply_user_action(&id, |inst| inst.unfavorite())?;
         } else {
-            self.mutate_instance(&id, |inst| inst.favorite());
+            self.apply_user_action(&id, |inst| inst.favorite())?;
         }
-        self.save()?;
         self.flat_items = self.build_flat_items();
         Ok(())
     }
@@ -800,8 +825,7 @@ impl HomeView {
             None => return Ok(()),
         };
         if is_archived {
-            self.mutate_instance(&id, |inst| inst.unarchive());
-            self.save()?;
+            self.apply_user_action(&id, |inst| inst.unarchive())?;
             self.flat_items = self.build_flat_items();
             // Re-seat the cursor on the just-unarchived session. After the
             // flat_items rebuild the row jumps from tier 99 to its real
@@ -820,8 +844,7 @@ impl HomeView {
             }
         }
 
-        self.mutate_instance(&id, |inst| inst.archive());
-        self.save()?;
+        self.apply_user_action(&id, |inst| inst.archive())?;
         self.flat_items = self.build_flat_items();
         if self.sort_order == crate::session::config::SortOrder::Attention {
             self.select_top_attention(None);

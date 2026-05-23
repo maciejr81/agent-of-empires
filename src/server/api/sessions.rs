@@ -620,17 +620,28 @@ pub async fn rename_session(
     let response =
         SessionResponse::from_instance(&*inst, crate::claude_settings::read_tui_fullscreen());
     let profile = inst.source_profile.clone();
+    drop(instances);
 
     if let Ok(storage) = Storage::new(&profile) {
         let title_clone = title.clone();
         let id_clone = id.clone();
-        if let Err(e) = storage.update(|instances, _groups| {
-            if let Some(inst) = instances.iter_mut().find(|i| i.id == id_clone) {
-                apply_session_title_rename(inst, title_clone);
+        match tokio::task::spawn_blocking(move || {
+            storage.update(|instances, _groups| {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == id_clone) {
+                    apply_session_title_rename(inst, title_clone);
+                }
+                Ok(())
+            })
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!(target: "http.api.sessions", "Failed to save after rename: {e}")
             }
-            Ok(())
-        }) {
-            tracing::error!(target: "http.api.sessions", "Failed to save after rename: {e}");
+            Err(e) => {
+                tracing::error!(target: "http.api.sessions", "Rename persist join failed: {e}")
+            }
         }
     }
 
@@ -724,21 +735,34 @@ pub async fn update_session_notifications(
     let response =
         SessionResponse::from_instance(&*inst, crate::claude_settings::read_tui_fullscreen());
     let profile = inst.source_profile.clone();
+    drop(instances);
 
     if let Ok(storage) = Storage::new(&profile) {
         let id_clone = id.clone();
         let waiting = body.notify_on_waiting;
         let idle = body.notify_on_idle;
         let error = body.notify_on_error;
-        if let Err(e) = storage.update(|instances, _groups| {
-            if let Some(inst) = instances.iter_mut().find(|i| i.id == id_clone) {
-                apply(&mut inst.notify_on_waiting, waiting);
-                apply(&mut inst.notify_on_idle, idle);
-                apply(&mut inst.notify_on_error, error);
-            }
-            Ok(())
-        }) {
-            tracing::error!(target: "http.api.sessions", "Failed to save after notification update: {e}");
+        match tokio::task::spawn_blocking(move || {
+            storage.update(|instances, _groups| {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == id_clone) {
+                    apply(&mut inst.notify_on_waiting, waiting);
+                    apply(&mut inst.notify_on_idle, idle);
+                    apply(&mut inst.notify_on_error, error);
+                }
+                Ok(())
+            })
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(
+                target: "http.api.sessions",
+                "Failed to save after notification update: {e}"
+            ),
+            Err(e) => tracing::error!(
+                target: "http.api.sessions",
+                "Notification persist join failed: {e}"
+            ),
         }
     }
 
@@ -801,6 +825,7 @@ pub async fn update_session_diff_base(
     let response =
         SessionResponse::from_instance(&*inst, crate::claude_settings::read_tui_fullscreen());
     let profile = inst.source_profile.clone();
+    drop(instances);
 
     if let Ok(storage) = Storage::new(&profile) {
         let id_clone = id.clone();
@@ -810,13 +835,25 @@ pub async fn update_session_diff_base(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(str::to_string);
-        if let Err(e) = storage.update(|instances, _groups| {
-            if let Some(inst) = instances.iter_mut().find(|i| i.id == id_clone) {
-                inst.base_branch_override = new_override;
-            }
-            Ok(())
-        }) {
-            tracing::error!(target: "http.api.sessions", "Failed to save after diff-base update: {e}");
+        match tokio::task::spawn_blocking(move || {
+            storage.update(|instances, _groups| {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == id_clone) {
+                    inst.base_branch_override = new_override;
+                }
+                Ok(())
+            })
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(
+                target: "http.api.sessions",
+                "Failed to save after diff-base update: {e}"
+            ),
+            Err(e) => tracing::error!(
+                target: "http.api.sessions",
+                "Diff-base persist join failed: {e}"
+            ),
         }
     }
 

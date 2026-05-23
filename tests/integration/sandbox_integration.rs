@@ -85,7 +85,11 @@ fn test_sandbox_info_persists_across_save_load() {
 
     let seeded = vec![inst.clone()];
     storage
-        .commit(&seeded, &GroupTree::new_with_groups(&seeded, &[]))
+        .update(|i, g| {
+            *i = seeded.to_vec();
+            *g = GroupTree::new_with_groups(&seeded, &[]).get_all_groups();
+            Ok(())
+        })
         .unwrap();
 
     let loaded = storage.load().unwrap();

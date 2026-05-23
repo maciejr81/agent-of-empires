@@ -1,34 +1,73 @@
-//! Session storage - JSON file persistence with in-process per-profile locking.
+//! Session storage - JSON file persistence with in-process and cross-process
+//! locking.
 //!
-//! `Storage` serialises read-modify-write cycles inside the same process via a
-//! per-profile mutex (one `Arc<Mutex<()>>` per profile name, registered process-
-//! wide). Mutators use `update` (load -> mutate -> save under the lock) or
-//! `commit` (locked wholesale write, for callers that already own the
-//! authoritative in-memory state, e.g. the TUI's `HomeView`). The
-//! `save_workspace_ordering` entry point is `pub(crate)` and only consumed
-//! by `update_workspace_ordering` internally; the per-profile `save` /
-//! `save_groups` helpers have been removed entirely. This keeps it
-//! structurally impossible to bypass the lock.
+//! `Storage` serialises read-modify-write cycles via two layers:
 //!
-//! Lock-ordering rule across the process: `AppState.instances` (tokio RwLock,
-//! server side) is acquired BEFORE `Storage`'s per-profile mutex, never the
-//! reverse. The closure passed to `update` is `FnOnce(...) -> Result<R>` and
-//! cannot await, so `std::sync::Mutex` is safe across the body even on the
-//! tokio runtime: server callers wrap `update` in `tokio::task::spawn_blocking`,
-//! which is the existing pattern.
+//! 1. **In-process per-profile mutex** (one `Arc<Mutex<()>>` per profile name,
+//!    registered process-wide). Cheap, kills intra-process races between
+//!    threads sharing the same `Storage` profile.
+//! 2. **Cross-process advisory `flock(2)`** on a sidecar lock file
+//!    (`<profile_dir>/.storage.lock` for sessions+groups,
+//!    `<app_dir>/.workspace-ordering.lock` for ordering). Polled
+//!    `fs2::FileExt::try_lock_exclusive` with a 50ms backoff so a >1s wait
+//!    can fire a single `tracing::warn`; the kernel releases the lock on
+//!    process exit, including SIGKILL, so a crashed peer cannot wedge other
+//!    aoe processes. Mirrors the pattern already used by `recovery.rs` and
+//!    `logging.rs`.
 //!
-//! Cross-process races (the TUI and `aoe serve` mutating the same profile
-//! concurrently) are explicitly out of scope here; a future advisory `flock`
-//! would close them.
+//! All mutation goes through `update` (load -> mutate -> save under both
+//! locks). `save_workspace_ordering` is private and only consumed by
+//! `update_workspace_ordering` internally; the per-profile `save` /
+//! `save_groups` helpers were removed entirely. This keeps it structurally
+//! impossible to bypass the locks.
+//!
+//! Lock-ordering rule across the process: server callers MUST drop
+//! `AppState.instances` (tokio RwLock) before acquiring `Storage`'s
+//! per-profile mutex via `tokio::task::spawn_blocking(... storage.update)`.
+//! The flock can park on a wedged peer for arbitrary time; holding the
+//! tokio RwLock across the wait would block every other reader/writer of
+//! `AppState.instances` and park the worker thread. The cross-process
+//! `flock` is acquired AFTER the in-process mutex and released BEFORE it
+//! (RAII drop order). The closure passed to `update` is
+//! `FnOnce(...) -> Result<R>` and cannot await, so `std::sync::Mutex` is
+//! safe across the body even on the tokio runtime.
+//!
+//! Closures must remain CPU/memory only (no network, no user input, no tmux
+//! work). A closure that hangs holds both layers indefinitely and blocks
+//! every peer process. The same hung-hook caveat documented in
+//! `recovery.rs` applies here.
+//!
+//! `update_workspace_ordering` and `Storage::update` must NOT be called from
+//! inside each other's closures. They use distinct lock files but acquiring
+//! both in different orders across processes would deadlock cross-process.
+//! Today no caller does this; this comment is the invariant.
 
 use anyhow::{anyhow, Result};
+use fs2::FileExt;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use super::{get_app_dir, get_profile_dir, Group, GroupTree, Instance};
+use super::{get_app_dir, get_profile_dir, Group, Instance};
+
+/// Sidecar lock file name for per-profile storage. Lives next to
+/// `sessions.json` and `groups.json` and covers both: every code path that
+/// mutates them does so as a pair under the same in-process mutex, so a
+/// single sidecar is sufficient and avoids any sub-file lock-ordering rule.
+const STORAGE_LOCK_FILENAME: &str = ".storage.lock";
+
+/// Sidecar lock file name for the global workspace-ordering file. Lives in
+/// `<app_dir>` next to `workspace-ordering.json`.
+const WORKSPACE_LOCK_FILENAME: &str = ".workspace-ordering.lock";
+
+/// Emit a tracing warn if the cross-process `flock` is held by a peer for
+/// longer than this. Surfaces a wedged peer in `aoe logs` instead of a
+/// silent stall. The acquire itself blocks indefinitely; the warning is
+/// observability only, not a timeout.
+const FLOCK_WAIT_WARN_AFTER: Duration = Duration::from_secs(1);
 
 /// Write `content` to `path` atomically (temp file + fsync + rename + dir fsync).
 /// Existing perms are preserved; on a fresh file the result is tempfile's 0o600 default.
@@ -75,6 +114,103 @@ fn save_lock_for(profile: &str) -> Arc<Mutex<()>> {
 fn workspace_ordering_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// RAII guard for a held cross-process `flock`. Drops via `fs2::FileExt::unlock`,
+/// which is also performed by the kernel when the file descriptor is closed,
+/// so a panic during the critical section still releases the lock.
+struct StorageFlock {
+    file: fs::File,
+}
+
+impl Drop for StorageFlock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+/// Acquire the cross-process advisory `flock` on `<dir>/<name>` by polling
+/// `try_lock_exclusive` every 50ms until it is granted. Open semantics
+/// mirror `recovery::try_acquire_recovery_lock` (read+write, create, no
+/// truncate) and `logging.rs`'s rotation lock.
+///
+/// Polling instead of `lock_exclusive` is deliberate: `fs2` exposes no hook
+/// to instrument a blocking acquire, and we need a single `tracing::warn`
+/// after `FLOCK_WAIT_WARN_AFTER` so a wedged peer is observable in
+/// `aoe logs`. The 50ms cadence is below human perception and far above any
+/// realistic mutator's hold time.
+///
+/// On Unix the lock file is chmodded to `0o600` so it never widens beyond
+/// the rest of `<app_dir>` regardless of the caller's umask. The kernel
+/// releases the lock on process exit (including SIGKILL), so a crashed peer
+/// cannot wedge us forever.
+fn acquire_storage_flock(dir: &Path, name: &str) -> Result<StorageFlock> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(name);
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)?
+    };
+    #[cfg(not(unix))]
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+
+    if let Err(e) = file.try_lock_exclusive() {
+        if e.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(e.into());
+        }
+        let started = Instant::now();
+        let mut warned = false;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => {
+                    let waited = started.elapsed();
+                    if waited >= FLOCK_WAIT_WARN_AFTER {
+                        if warned {
+                            tracing::info!(
+                                target: "session.store",
+                                ?waited,
+                                path = %path.display(),
+                                "storage flock acquired after wait"
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: "session.store",
+                                ?waited,
+                                path = %path.display(),
+                                "storage flock contended for >1s; another aoe process held it"
+                            );
+                        }
+                    }
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if !warned && started.elapsed() >= FLOCK_WAIT_WARN_AFTER {
+                        tracing::warn!(
+                            target: "session.store",
+                            path = %path.display(),
+                            "storage flock contended for >1s; another aoe process is mid-write"
+                        );
+                        warned = true;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(StorageFlock { file })
 }
 
 pub struct Storage {
@@ -166,17 +302,23 @@ impl Storage {
     /// sibling files and is tolerated by the loader (`GroupTree` accepts
     /// orphan group rows).
     ///
-    /// This is the only way to mutate persisted session state from any caller
-    /// that does not already own the authoritative in-memory copy. Use `commit`
-    /// when the caller (e.g. TUI `HomeView`) IS that authoritative copy.
+    /// This is the only public mutator entry point; all writes funnel
+    /// through here so both lock layers are always taken.
     pub fn update<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut Vec<Instance>, &mut Vec<Group>) -> Result<R>,
     {
-        let _guard = self
+        let _mu = self
             .save_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let profile_dir = self.sessions_path.parent().ok_or_else(|| {
+            anyhow!(
+                "sessions_path missing parent: {}",
+                self.sessions_path.display()
+            )
+        })?;
+        let _flock = acquire_storage_flock(profile_dir, STORAGE_LOCK_FILENAME)?;
         let (mut instances, mut groups) = self.load_with_groups()?;
         let groups_before = groups.clone();
         let result = f(&mut instances, &mut groups)?;
@@ -200,29 +342,6 @@ impl Storage {
         }
         atomic_write(&self.sessions_path, &instances_buf)?;
         Ok(result)
-    }
-
-    /// Locked wholesale write of `sessions.json` + `groups.json`. Last-writer-
-    /// wins by design: any concurrent `update` whose load happened before this
-    /// `commit` is overwritten. This is correct for HomeView (the TUI's
-    /// authoritative in-memory copy); other callers should use `update`.
-    ///
-    /// Both buffers are serialised before any disk write, so a serialisation
-    /// failure on either side leaves both files untouched. The two atomic
-    /// writes happen in the same order as `update` (groups, then sessions);
-    /// the same residual disk-failure window applies.
-    pub fn commit(&self, instances: &[Instance], group_tree: &GroupTree) -> Result<()> {
-        let _guard = self
-            .save_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let groups = group_tree.get_all_groups();
-        let instances_buf = serde_json::to_vec_pretty(instances)?;
-        let groups_buf = serde_json::to_vec_pretty(&groups)?;
-        let groups_path = self.sessions_path.with_file_name("groups.json");
-        atomic_write(&groups_path, &groups_buf)?;
-        atomic_write(&self.sessions_path, &instances_buf)?;
-        Ok(())
     }
 }
 
@@ -254,16 +373,18 @@ pub fn update_workspace_ordering<F, R>(f: F) -> Result<R>
 where
     F: FnOnce(&mut WorkspaceOrdering) -> Result<R>,
 {
-    let _guard = workspace_ordering_lock()
+    let _mu = workspace_ordering_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let app_dir = get_app_dir()?;
+    let _flock = acquire_storage_flock(&app_dir, WORKSPACE_LOCK_FILENAME)?;
     let mut ordering = load_workspace_ordering()?;
     let result = f(&mut ordering)?;
     save_workspace_ordering(&ordering)?;
     Ok(result)
 }
 
-pub(crate) fn save_workspace_ordering(ordering: &WorkspaceOrdering) -> Result<()> {
+fn save_workspace_ordering(ordering: &WorkspaceOrdering) -> Result<()> {
     let path = workspace_ordering_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -276,6 +397,7 @@ pub(crate) fn save_workspace_ordering(ordering: &WorkspaceOrdering) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::GroupTree;
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -298,7 +420,11 @@ mod tests {
             Instance::new("test2", "/tmp/test2"),
         ];
 
-        storage.commit(&instances, &GroupTree::new_with_groups(&instances, &[]))?;
+        storage.update(|i, g| {
+            *i = instances.to_vec();
+            *g = GroupTree::new_with_groups(&instances, &[]).get_all_groups();
+            Ok(())
+        })?;
         let loaded = storage.load()?;
 
         assert_eq!(loaded.len(), 2);
@@ -426,17 +552,27 @@ mod tests {
 
         for i in 0..5 {
             let instances = vec![Instance::new(&format!("iter{i}"), "/tmp/test")];
-            storage.commit(&instances, &GroupTree::new_with_groups(&instances, &[]))?;
+            storage.update(|i, g| {
+                *i = instances.to_vec();
+                *g = GroupTree::new_with_groups(&instances, &[]).get_all_groups();
+                Ok(())
+            })?;
         }
 
         let dir = storage.sessions_path.parent().unwrap();
-        let mut entries: Vec<_> = fs::read_dir(dir)?
+        let entries: Vec<_> = fs::read_dir(dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        entries.sort();
 
-        assert_eq!(entries, vec!["groups.json", "sessions.json"]);
+        for entry in &entries {
+            assert!(
+                !entry.contains(".tmp"),
+                "atomic_write must not leak temp files; found {}",
+                entry
+            );
+        }
+        assert!(entries.contains(&"sessions.json".to_string()));
         Ok(())
     }
 
@@ -449,7 +585,11 @@ mod tests {
         let storage = Storage::new("test-empty-save")?;
         {
             let xs: Vec<Instance> = vec![];
-            storage.commit(&xs, &GroupTree::new_with_groups(&xs, &[]))?
+            storage.update(|i, g| {
+                *i = xs.to_vec();
+                *g = GroupTree::new_with_groups(&xs, &[]).get_all_groups();
+                Ok(())
+            })?
         };
 
         let content = fs::read_to_string(&storage.sessions_path)?;
@@ -466,7 +606,11 @@ mod tests {
         let storage = Storage::new("test-no-groups")?;
 
         let instances = vec![Instance::new("test", "/tmp/test")];
-        storage.commit(&instances, &GroupTree::new_with_groups(&instances, &[]))?;
+        storage.update(|i, g| {
+            *i = instances.to_vec();
+            *g = GroupTree::new_with_groups(&instances, &[]).get_all_groups();
+            Ok(())
+        })?;
 
         let (loaded_instances, loaded_groups) = storage.load_with_groups()?;
         assert_eq!(loaded_instances.len(), 1);
@@ -488,7 +632,11 @@ mod tests {
         let groups = vec![Group::new("projects", "work/projects")];
         let group_tree = GroupTree::new_with_groups(&instances, &groups);
 
-        storage.commit(&instances, &group_tree)?;
+        storage.update(|i, g| {
+            *i = instances.to_vec();
+            *g = group_tree.get_all_groups();
+            Ok(())
+        })?;
 
         let (loaded_instances, loaded_groups) = storage.load_with_groups()?;
         assert_eq!(loaded_instances.len(), 1);
@@ -528,7 +676,11 @@ mod tests {
 
         {
             let xs: Vec<Instance> = vec![instance.clone()];
-            storage.commit(&xs, &GroupTree::new_with_groups(&xs, &[]))?
+            storage.update(|i, g| {
+                *i = xs.to_vec();
+                *g = GroupTree::new_with_groups(&xs, &[]).get_all_groups();
+                Ok(())
+            })?
         };
         let loaded = storage.load()?;
 
@@ -571,7 +723,11 @@ mod tests {
         // Save sessions
         {
             let xs: Vec<Instance> = vec![Instance::new("test", "/tmp/test")];
-            storage.commit(&xs, &GroupTree::new_with_groups(&xs, &[]))?
+            storage.update(|i, g| {
+                *i = xs.to_vec();
+                *g = GroupTree::new_with_groups(&xs, &[]).get_all_groups();
+                Ok(())
+            })?
         };
 
         // Create empty groups file
@@ -650,10 +806,11 @@ mod tests {
         setup_test_home(temp.path());
 
         let storage = Storage::new("test-update-roundtrip")?;
-        storage.commit(
-            &[Instance::new("seed", "/tmp/seed")],
-            &GroupTree::new_with_groups(&[], &[]),
-        )?;
+        storage.update(|i, g| {
+            *i = [Instance::new("seed", "/tmp/seed")].to_vec();
+            *g = GroupTree::new_with_groups(&[], &[]).get_all_groups();
+            Ok(())
+        })?;
 
         storage.update(|instances, _groups| {
             instances.push(Instance::new("added", "/tmp/added"));
@@ -675,7 +832,11 @@ mod tests {
 
         let storage = Storage::new("test-update-err")?;
         let initial = vec![Instance::new("keep", "/tmp/keep")];
-        storage.commit(&initial, &GroupTree::new_with_groups(&initial, &[]))?;
+        storage.update(|i, g| {
+            *i = initial.to_vec();
+            *g = GroupTree::new_with_groups(&initial, &[]).get_all_groups();
+            Ok(())
+        })?;
 
         let result: Result<()> = storage.update(|instances, _| {
             instances.push(Instance::new("doomed", "/tmp/doomed"));
@@ -696,7 +857,11 @@ mod tests {
         setup_test_home(temp.path());
 
         let storage = Storage::new("test-update-concurrent")?;
-        storage.commit(&[], &GroupTree::new_with_groups(&[], &[]))?;
+        storage.update(|i, g| {
+            *i = [].to_vec();
+            *g = GroupTree::new_with_groups(&[], &[]).get_all_groups();
+            Ok(())
+        })?;
 
         let n_threads = 32usize;
         std::thread::scope(|scope| {
@@ -769,7 +934,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_commit_takes_same_lock_as_update() -> Result<()> {
+    fn test_update_takes_same_lock_across_threads() -> Result<()> {
         use std::sync::Barrier;
         use std::time::{Duration, Instant};
 
@@ -777,7 +942,11 @@ mod tests {
         setup_test_home(temp.path());
 
         let storage = Storage::new("test-commit-lock")?;
-        storage.commit(&[], &GroupTree::new_with_groups(&[], &[]))?;
+        storage.update(|i, g| {
+            *i = [].to_vec();
+            *g = GroupTree::new_with_groups(&[], &[]).get_all_groups();
+            Ok(())
+        })?;
 
         let entered = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
@@ -801,10 +970,11 @@ mod tests {
         let committer = std::thread::spawn(|| {
             let storage = Storage::new("test-commit-lock").unwrap();
             storage
-                .commit(
-                    &[Instance::new("from-commit", "/tmp/c")],
-                    &GroupTree::new_with_groups(&[], &[]),
-                )
+                .update(|i, g| {
+                    *i = [Instance::new("from-commit", "/tmp/c")].to_vec();
+                    *g = GroupTree::new_with_groups(&[], &[]).get_all_groups();
+                    Ok(())
+                })
                 .unwrap();
         });
 
@@ -885,7 +1055,11 @@ mod tests {
         setup_test_home(temp.path());
 
         let storage = Storage::new("test-update-both-files")?;
-        storage.commit(&[], &GroupTree::new_with_groups(&[], &[]))?;
+        storage.update(|i, g| {
+            *i = [].to_vec();
+            *g = GroupTree::new_with_groups(&[], &[]).get_all_groups();
+            Ok(())
+        })?;
 
         storage.update(|instances, groups| {
             instances.push(Instance::new("inst", "/tmp/inst"));
@@ -914,7 +1088,11 @@ mod tests {
         let seed_groups = vec![Group::new("seed-group", "work/seed")];
         let mut tree = GroupTree::new_with_groups(&seed, &seed_groups);
         tree.create_group("work/seed");
-        storage.commit(&seed, &tree)?;
+        storage.update(|i, g| {
+            *i = seed.to_vec();
+            *g = tree.get_all_groups();
+            Ok(())
+        })?;
 
         let groups_path = storage.sessions_path.with_file_name("groups.json");
         let sessions_before = fs::read(&storage.sessions_path)?;
@@ -939,11 +1117,12 @@ mod tests {
         setup_test_home(temp.path());
 
         let storage = Storage::new("test-skip-groups-write")?;
-        let seed_instances = vec![Instance::new("seed", "/tmp/seed")];
-        storage.commit(
-            &seed_instances,
-            &GroupTree::new_with_groups(&seed_instances, &[]),
-        )?;
+        let seed_instances = [Instance::new("seed", "/tmp/seed")];
+        storage.update(|i, g| {
+            *i = seed_instances.to_vec();
+            g.push(Group::new("seed-group", "seed-group"));
+            Ok(())
+        })?;
 
         let groups_path = storage.sessions_path.with_file_name("groups.json");
         let groups_mtime_before = fs::metadata(&groups_path)?.modified()?;
@@ -970,11 +1149,12 @@ mod tests {
         setup_test_home(temp.path());
 
         let storage = Storage::new("test-rewrite-groups")?;
-        let seed_instances = vec![Instance::new("seed", "/tmp/seed")];
-        storage.commit(
-            &seed_instances,
-            &GroupTree::new_with_groups(&seed_instances, &[]),
-        )?;
+        let seed_instances = [Instance::new("seed", "/tmp/seed")];
+        storage.update(|i, g| {
+            *i = seed_instances.to_vec();
+            g.push(Group::new("seed-group", "seed-group"));
+            Ok(())
+        })?;
 
         let groups_path = storage.sessions_path.with_file_name("groups.json");
         let groups_mtime_before = fs::metadata(&groups_path)?.modified()?;
