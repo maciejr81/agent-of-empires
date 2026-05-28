@@ -54,17 +54,165 @@ export function repoGroupLastActivityMs(
   return best;
 }
 
-/** Stable, deterministic comparator. Activity descending, tie-break by id
- *  ascending so equal timestamps never flake the render order. The two
- *  activity keys are compared with `<` / `>` rather than subtraction
- *  because workspaces with no usable timestamp return
- *  `Number.NEGATIVE_INFINITY`; `-Infinity - -Infinity` is `NaN`, which
- *  `Array.prototype.sort` treats like `0` (equal) and would silently skip
- *  the id tie-break, leaving ordering at the mercy of input order. */
+/** True when at least one of the workspace's sessions has been
+ *  web-pinned. Mirrors the aggregator shape used for `isFavorited` in
+ *  `WorkspaceSidebar.tsx`. See #1581. */
+export function workspaceIsPinned(ws: Workspace): boolean {
+  return ws.sessions.some((s) => s.pinned_at != null);
+}
+
+/** True when every one of the workspace's sessions is in a sink state
+ *  (archived or currently snoozed). Uses an "all sessions sunk"
+ *  aggregator on purpose: a multi-session workspace with one running
+ *  session must not disappear into the collapsible footer just because
+ *  a sibling session was archived. See #1581. */
+export function workspaceIsSunk(ws: Workspace): boolean {
+  if (ws.sessions.length === 0) return false;
+  return ws.sessions.every(
+    (s) => s.archived_at != null || s.snoozed_until != null,
+  );
+}
+
+/** Triage tier for a workspace: 0 = pinned (top of every sort), 1 =
+ *  live (default), 2 = sunk (bottom of every sort, target of the
+ *  collapsible "Snoozed & archived" section). A workspace cannot be
+ *  both pinned and sunk because `Instance::pin()` clears the sink
+ *  fields server-side, so any pinned session keeps the whole workspace
+ *  in tier 0 even if a sibling session is archived. See #1581. */
+export function workspaceTriageTier(ws: Workspace): 0 | 1 | 2 {
+  if (workspaceIsPinned(ws)) return 0;
+  if (workspaceIsSunk(ws)) return 2;
+  return 1;
+}
+
+/** Whether two RFC3339 snooze timestamps are close enough to count
+ *  as the same snooze deadline, given some unavoidable skew between
+ *  the client's `Date.now()` (used to mint the optimistic preview)
+ *  and the server's `Utc::now()` (used by `Instance::snooze`). A 2
+ *  minute tolerance covers serialization rounding, daemon RTT, and
+ *  small clock drift without letting a brand-new snooze get swapped
+ *  back to a stale one. Unparseable strings fall back to literal
+ *  equality so the helper is defensive. See #1581. */
+export function snoozeTimestampCloseEnough(
+  aIso: string,
+  bIso: string,
+): boolean {
+  const a = Date.parse(aIso);
+  const b = Date.parse(bIso);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return aIso === bIso;
+  return Math.abs(a - b) <= 2 * 60_000;
+}
+
+/** Resolve the "effective" snoozed_until value the row should render
+ *  with, given a server-derived prop and an optimistic local
+ *  override. `undefined` on the optimistic side means "no override,
+ *  fall through"; `null` means "pretend the server already
+ *  unsnoozed"; a string means "pretend the server already snoozed
+ *  until then." Extracted as a pure helper so the optimistic
+ *  resolution is unit-testable without mounting the whole sidebar.
+ *  See #1581 CodeRabbit review. */
+export function resolveEffectiveSnoozedUntil(
+  optimistic: string | null | undefined,
+  serverValue: string | null | undefined,
+): string | null | undefined {
+  if (optimistic === undefined) return serverValue;
+  return optimistic;
+}
+
+/** Triage state of a single session row, used by the sidebar context
+ *  menu to decide which actions to show. The state machine is
+ *  mutually exclusive: only one of pinned/archived/snoozed can be the
+ *  active state at a time (the server's XOR rules in
+ *  `Instance::pin/archive/snooze` enforce this), so the menu only
+ *  offers the corresponding "Un…" toggle plus Rename / Notifications
+ *  / Delete. Live rows get the full Pin / Archive / Snooze… set.
+ *  See #1581. */
+export type TriageState = "live" | "pinned" | "archived" | "snoozed";
+
+/** Action visibility from a triage state. The state machine assumes
+ *  the server has already enforced mutual exclusion, so a row that is
+ *  archived simply cannot also be pinned: the menu would show two
+ *  contradictory toggles. Priority for the (impossible-but-defensive)
+ *  case where a workspace aggregator surfaces more than one tier:
+ *  pinned > archived > snoozed > live. */
+export interface TriageMenuShape {
+  showPin: boolean;
+  showUnpin: boolean;
+  showArchive: boolean;
+  showUnarchive: boolean;
+  showSnooze: boolean;
+  showUnsnooze: boolean;
+}
+
+export function triageStateOf(input: {
+  isPinned: boolean;
+  isArchived: boolean;
+  isSnoozed: boolean;
+}): TriageState {
+  if (input.isPinned) return "pinned";
+  if (input.isArchived) return "archived";
+  if (input.isSnoozed) return "snoozed";
+  return "live";
+}
+
+export function triageMenuShape(state: TriageState): TriageMenuShape {
+  switch (state) {
+    case "pinned":
+      return {
+        showPin: false,
+        showUnpin: true,
+        showArchive: false,
+        showUnarchive: false,
+        showSnooze: false,
+        showUnsnooze: false,
+      };
+    case "archived":
+      return {
+        showPin: false,
+        showUnpin: false,
+        showArchive: false,
+        showUnarchive: true,
+        showSnooze: false,
+        showUnsnooze: false,
+      };
+    case "snoozed":
+      return {
+        showPin: false,
+        showUnpin: false,
+        showArchive: false,
+        showUnarchive: false,
+        showSnooze: false,
+        showUnsnooze: true,
+      };
+    case "live":
+      return {
+        showPin: true,
+        showUnpin: false,
+        showArchive: true,
+        showUnarchive: false,
+        showSnooze: true,
+        showUnsnooze: false,
+      };
+  }
+}
+
+/** Stable, deterministic comparator. Triage tier wins first (pinned at
+ *  the top, sunk at the bottom, regardless of sort mode); within tier
+ *  the comparator falls back to last-activity descending, with id
+ *  ascending as the tie-break so equal timestamps never flake the
+ *  render order. The two activity keys are compared with `<` / `>`
+ *  rather than subtraction because workspaces with no usable timestamp
+ *  return `Number.NEGATIVE_INFINITY`; `-Infinity - -Infinity` is
+ *  `NaN`, which `Array.prototype.sort` treats like `0` (equal) and
+ *  would silently skip the id tie-break, leaving ordering at the mercy
+ *  of input order. */
 export function compareWorkspacesByLastActivityDesc(
   a: Workspace,
   b: Workspace,
 ): number {
+  const aTier = workspaceTriageTier(a);
+  const bTier = workspaceTriageTier(b);
+  if (aTier !== bTier) return aTier - bTier;
   const aMs = workspaceLastActivityMs(a);
   const bMs = workspaceLastActivityMs(b);
   if (aMs < bMs) return 1;

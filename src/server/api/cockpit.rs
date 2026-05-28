@@ -444,6 +444,77 @@ pub async fn cockpit_prompt(
         Ok(j) => j,
         Err(rej) => return rej.into_response(),
     };
+    // Touch the instance before forwarding so an archived or
+    // currently-snoozed session auto-wakes the same way the tmux send
+    // path does (`/api/sessions/{id}/send`). `touch_last_accessed`
+    // clears `archived_at` and `snoozed_until` so the cockpit
+    // reconciler stops skipping the session on its next ~2s tick and
+    // respawns the worker; the frontend's queue drains as soon as the
+    // fresh `AcpSessionAssigned` lands. See #1581.
+    //
+    // The in-memory mutation and the disk persistence are both held
+    // under `state.instance_lock(&id)` so they serialize against
+    // other session-mutating endpoints (archive / snooze / pin /
+    // rename) on the same id. Without this guard, a concurrent
+    // archive PATCH could interleave with the touch and produce a
+    // lost write (archive sets archived_at = Some, touch clears it,
+    // archive's persist lands first, touch's persist lands second
+    // and overwrites the archive).
+    let inst_lock = state.instance_lock(&id).await;
+    let _guard = inst_lock.lock().await;
+    let triage_changed = {
+        let mut instances = state.instances.write().await;
+        if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
+            let was_sunk = inst.is_archived() || inst.is_snoozed();
+            if was_sunk {
+                inst.touch_last_accessed();
+            }
+            was_sunk
+        } else {
+            false
+        }
+    };
+    if triage_changed {
+        let profile = {
+            let instances = state.instances.read().await;
+            instances
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| i.source_profile.clone())
+                .unwrap_or_default()
+        };
+        if let Ok(storage) = crate::session::Storage::new(&profile) {
+            let id_clone = id.clone();
+            let session_id_for_log = id.clone();
+            match tokio::task::spawn_blocking(move || {
+                storage.update(|instances, _groups| {
+                    if let Some(inst) = instances.iter_mut().find(|i| i.id == id_clone) {
+                        inst.touch_last_accessed();
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    target: "http.api.cockpit",
+                    session = %session_id_for_log,
+                    "failed to save after triage auto-wake: {e}"
+                ),
+                Err(join_err) => tracing::warn!(
+                    target: "http.api.cockpit",
+                    session = %session_id_for_log,
+                    "spawn_blocking join error during triage auto-wake save: {join_err}"
+                ),
+            }
+        }
+    }
+    // Drop the per-session lock before reaching out to the
+    // supervisor. publish_user_prompt and send_prompt take their own
+    // locks downstream; holding ours across the agent forward would
+    // serialize prompts unnecessarily and stall siblings.
+    drop(_guard);
     // Publish the user's prompt into the event stream BEFORE forwarding
     // to the agent so the replay buffer / on-disk store captures it
     // even if the agent forward fails. The frontend treats UserPromptSent

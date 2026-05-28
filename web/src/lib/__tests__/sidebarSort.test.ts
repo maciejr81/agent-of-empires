@@ -7,8 +7,15 @@ import {
   compareWorkspacesByLastActivityDesc,
   loadSidebarSortMode,
   repoGroupLastActivityMs,
+  resolveEffectiveSnoozedUntil,
   saveSidebarSortMode,
+  snoozeTimestampCloseEnough,
+  triageMenuShape,
+  triageStateOf,
+  workspaceIsPinned,
+  workspaceIsSunk,
   workspaceLastActivityMs,
+  workspaceTriageTier,
 } from "../sidebarSort";
 
 function session(over: Partial<SessionResponse> = {}): SessionResponse {
@@ -176,6 +183,376 @@ describe("repoGroupLastActivityMs", () => {
 
   it("returns NEGATIVE_INFINITY on an empty group", () => {
     expect(repoGroupLastActivityMs([])).toBe(Number.NEGATIVE_INFINITY);
+  });
+});
+
+describe("workspaceIsPinned", () => {
+  it("returns true when any session has pinned_at set", () => {
+    const ws = workspace("w", [
+      session({ id: "s1" }),
+      session({ id: "s2", pinned_at: "2025-01-01T00:00:00Z" }),
+    ]);
+    expect(workspaceIsPinned(ws)).toBe(true);
+  });
+
+  it("returns false when no session is pinned", () => {
+    const ws = workspace("w", [session({ id: "s1" }), session({ id: "s2" })]);
+    expect(workspaceIsPinned(ws)).toBe(false);
+  });
+});
+
+describe("workspaceIsSunk", () => {
+  it("returns true when every session is archived or snoozed", () => {
+    const ws = workspace("w", [
+      session({ id: "s1", archived_at: "2025-01-01T00:00:00Z" }),
+      session({ id: "s2", snoozed_until: "2026-01-01T00:00:00Z" }),
+    ]);
+    expect(workspaceIsSunk(ws)).toBe(true);
+  });
+
+  it("returns false when even one session is live", () => {
+    // A multi-session workspace with one live session must stay in the
+    // active tier rather than sinking the whole group out of sight.
+    const ws = workspace("w", [
+      session({ id: "s1", archived_at: "2025-01-01T00:00:00Z" }),
+      session({ id: "s2" }),
+    ]);
+    expect(workspaceIsSunk(ws)).toBe(false);
+  });
+
+  it("returns false on an empty workspace", () => {
+    const ws = workspace("w", []);
+    expect(workspaceIsSunk(ws)).toBe(false);
+  });
+
+  it("returns true when every session is archived-only (no snooze)", () => {
+    // Branch coverage on the lambda: `archived_at != null` true side
+    // alone, no snoozed_until contribution.
+    const ws = workspace("w", [
+      session({ id: "s1", archived_at: "2025-01-01T00:00:00Z" }),
+      session({ id: "s2", archived_at: "2025-02-01T00:00:00Z" }),
+    ]);
+    expect(workspaceIsSunk(ws)).toBe(true);
+  });
+
+  it("returns true when every session is snoozed-only (no archive)", () => {
+    // Branch coverage on the lambda: `snoozed_until != null` true
+    // side alone, after archived_at false short-circuits the `||`.
+    const ws = workspace("w", [
+      session({ id: "s1", snoozed_until: "2099-01-01T00:00:00Z" }),
+      session({ id: "s2", snoozed_until: "2099-02-01T00:00:00Z" }),
+    ]);
+    expect(workspaceIsSunk(ws)).toBe(true);
+  });
+
+  it("returns false when one session has neither flag", () => {
+    // Branch coverage: the lambda's `archived_at != null` false side
+    // AND `snoozed_until != null` false side both fire, then `every`
+    // short-circuits with false.
+    const ws = workspace("w", [
+      session({ id: "s1", archived_at: "2025-01-01T00:00:00Z" }),
+      session({ id: "s2" }), // live session breaks the every().
+    ]);
+    expect(workspaceIsSunk(ws)).toBe(false);
+  });
+});
+
+describe("workspaceTriageTier", () => {
+  it("returns 0 (pinned) for any pinned session, overriding sink fields", () => {
+    // Pin clears archive/snooze server-side, but a sibling session in
+    // the same workspace could still be archived. Any-pinned wins.
+    const ws = workspace("w", [
+      session({ id: "s1", pinned_at: "2025-01-01T00:00:00Z" }),
+      session({ id: "s2", archived_at: "2025-01-01T00:00:00Z" }),
+    ]);
+    expect(workspaceTriageTier(ws)).toBe(0);
+  });
+
+  it("returns 1 (live) when neither pinned nor fully sunk", () => {
+    const ws = workspace("w", [session({ id: "s1" })]);
+    expect(workspaceTriageTier(ws)).toBe(1);
+  });
+
+  it("returns 2 (sunk) when every session is archived or snoozed", () => {
+    const ws = workspace("w", [
+      session({ id: "s1", archived_at: "2025-01-01T00:00:00Z" }),
+    ]);
+    expect(workspaceTriageTier(ws)).toBe(2);
+  });
+});
+
+describe("resolveEffectiveSnoozedUntil", () => {
+  it("returns the server value when no optimistic override is set", () => {
+    // Regression: snooze had no optimistic state; the chip waited
+    // for the next sessions-poll to flip, which read laggy compared
+    // to pin / archive's instant feedback. See #1581 CodeRabbit
+    // review. `undefined` on the optimistic side means "no override,
+    // fall through to the server value."
+    expect(resolveEffectiveSnoozedUntil(undefined, null)).toBeNull();
+    expect(
+      resolveEffectiveSnoozedUntil(undefined, "2099-01-01T00:00:00Z"),
+    ).toBe("2099-01-01T00:00:00Z");
+  });
+
+  it("uses an optimistic string to render the snooze chip pre-PATCH", () => {
+    // Regression: clicking a preset must flip the chip immediately,
+    // not wait for the round-trip. Optimistic value wins over the
+    // (still-null) server prop until the next poll mirrors it.
+    expect(
+      resolveEffectiveSnoozedUntil("2099-01-01T00:00:00Z", null),
+    ).toBe("2099-01-01T00:00:00Z");
+  });
+
+  it("uses an explicit null override to hide the chip pre-PATCH on unsnooze", () => {
+    // Clicking Unsnooze flips the chip away while the PATCH is in
+    // flight. The optimistic null wins until the server prop also
+    // returns null and the clear-on-prop-sync effect drops the
+    // override.
+    expect(
+      resolveEffectiveSnoozedUntil(null, "2099-01-01T00:00:00Z"),
+    ).toBeNull();
+  });
+});
+
+describe("snoozeTimestampCloseEnough", () => {
+  it("treats equal timestamps as a match", () => {
+    expect(
+      snoozeTimestampCloseEnough(
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:00:00Z",
+      ),
+    ).toBe(true);
+  });
+
+  it("tolerates a 30-second skew", () => {
+    expect(
+      snoozeTimestampCloseEnough(
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:00:30Z",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects a 5-minute skew (re-snooze case)", () => {
+    // Regression: re-snoozing an already-snoozed row used to drop
+    // the optimistic override because the prop and override were
+    // both non-null. The new helper compares actual timestamps so
+    // a 1h re-snooze on a row already sitting on a 1h snooze
+    // (where the server hasn't acked the new duration yet) keeps
+    // the optimistic chip visible. See #1581 CodeRabbit review.
+    expect(
+      snoozeTimestampCloseEnough(
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:05:00Z",
+      ),
+    ).toBe(false);
+  });
+
+  it("falls back to literal equality for unparseable strings", () => {
+    expect(snoozeTimestampCloseEnough("not-a-date", "not-a-date")).toBe(true);
+    expect(snoozeTimestampCloseEnough("not-a-date", "also-bad")).toBe(false);
+  });
+
+  it("covers both `||` short-circuit branches when only one side is unparseable", () => {
+    // Branch coverage: the `!Number.isFinite(a) || !Number.isFinite(b)`
+    // check has 4 outcomes (a/b each parseable or not). The other
+    // cases above hit both-finite and both-unparseable; these two
+    // exercise the mixed cases so v8 sees every branch leg.
+    expect(
+      snoozeTimestampCloseEnough("2099-01-01T00:00:00Z", "not-a-date"),
+    ).toBe(false);
+    expect(
+      snoozeTimestampCloseEnough("not-a-date", "2099-01-01T00:00:00Z"),
+    ).toBe(false);
+  });
+
+  it("rejects exactly at the 2-minute tolerance boundary", () => {
+    // Inclusive boundary at 2 minutes (= 120_000 ms). Just-over
+    // counts as different snoozes; just-under counts as the same.
+    expect(
+      snoozeTimestampCloseEnough(
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:02:00Z",
+      ),
+    ).toBe(true);
+    expect(
+      snoozeTimestampCloseEnough(
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:02:00.001Z",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("rank-based comparator with two unranked workspaces", () => {
+  it("compares with `<`/`>` instead of subtraction to avoid NaN", () => {
+    // Regression: two workspaces missing from the persisted ordering
+    // both resolve to `Infinity`; `Infinity - Infinity` is `NaN`,
+    // which `Array.prototype.sort` treats like equality and silently
+    // skips the id tie-break, leaving order at the mercy of input
+    // order. This test simulates the same rank-based comparator used
+    // by `useRepoGroups.sortByRank` and asserts deterministic order
+    // by id ascending. See #1581 CodeRabbit review.
+    const rank = new Map<string, number>();
+    const rankOf = (id: string) => rank.get(id) ?? Infinity;
+    const cmp = (a: Workspace, b: Workspace) => {
+      const ar = rankOf(a.id);
+      const br = rankOf(b.id);
+      if (ar < br) return -1;
+      if (ar > br) return 1;
+      return a.id.localeCompare(b.id);
+    };
+    const wsZ = workspace("z", [session({ id: "sz" })]);
+    const wsA = workspace("a", [session({ id: "sa" })]);
+    const wsM = workspace("m", [session({ id: "sm" })]);
+    const sorted = [wsZ, wsA, wsM].sort(cmp);
+    expect(sorted.map((w) => w.id)).toEqual(["a", "m", "z"]);
+  });
+});
+
+describe("compareWorkspacesByLastActivityDesc triage tier", () => {
+  it("sinks fully-archived workspaces below live ones regardless of activity", () => {
+    // The archived workspace has the most recent activity timestamp; if
+    // the comparator naively used activity only it would sort first.
+    // Triage tier forces it to the bottom.
+    const archived = workspace("archived-newer", [
+      session({
+        id: "sa",
+        created_at: "2025-09-01T00:00:00Z",
+        archived_at: "2025-09-02T00:00:00Z",
+      }),
+    ]);
+    const live = workspace("live-older", [
+      session({ id: "sl", created_at: "2025-01-01T00:00:00Z" }),
+    ]);
+    const list = [archived, live].sort(compareWorkspacesByLastActivityDesc);
+    expect(list.map((w) => w.id)).toEqual(["live-older", "archived-newer"]);
+  });
+
+  it("lifts pinned workspaces above live ones regardless of activity", () => {
+    // The pinned workspace has the older activity timestamp; without
+    // the tier prefix the live one would sort first.
+    const pinned = workspace("pinned-older", [
+      session({
+        id: "sp",
+        created_at: "2025-01-01T00:00:00Z",
+        pinned_at: "2025-01-02T00:00:00Z",
+      }),
+    ]);
+    const live = workspace("live-newer", [
+      session({ id: "sl", created_at: "2025-09-01T00:00:00Z" }),
+    ]);
+    const list = [live, pinned].sort(compareWorkspacesByLastActivityDesc);
+    expect(list.map((w) => w.id)).toEqual(["pinned-older", "live-newer"]);
+  });
+
+  it("preserves activity order within the same tier", () => {
+    const livesA = workspace("live-a", [
+      session({ id: "sa", created_at: "2025-09-01T00:00:00Z" }),
+    ]);
+    const livesB = workspace("live-b", [
+      session({ id: "sb", created_at: "2025-01-01T00:00:00Z" }),
+    ]);
+    const list = [livesB, livesA].sort(compareWorkspacesByLastActivityDesc);
+    expect(list.map((w) => w.id)).toEqual(["live-a", "live-b"]);
+  });
+});
+
+describe("triageStateOf", () => {
+  it("returns 'live' when no flag is set", () => {
+    expect(
+      triageStateOf({ isPinned: false, isArchived: false, isSnoozed: false }),
+    ).toBe("live");
+  });
+
+  it("returns 'pinned' when isPinned is set", () => {
+    expect(
+      triageStateOf({ isPinned: true, isArchived: false, isSnoozed: false }),
+    ).toBe("pinned");
+  });
+
+  it("returns 'archived' when only archived is set", () => {
+    expect(
+      triageStateOf({ isPinned: false, isArchived: true, isSnoozed: false }),
+    ).toBe("archived");
+  });
+
+  it("returns 'snoozed' when only snoozed is set", () => {
+    expect(
+      triageStateOf({ isPinned: false, isArchived: false, isSnoozed: true }),
+    ).toBe("snoozed");
+  });
+
+  it("returns 'archived' when archived + snoozed are both set (no pin)", () => {
+    // Branch coverage: the archived/snoozed branch combo without
+    // pin. Archive wins because the data layer makes it impossible
+    // for a session to be both at once, but workspace aggregators
+    // can surface both via different sessions. Archive is the
+    // stronger sink so the menu picks it.
+    expect(
+      triageStateOf({ isPinned: false, isArchived: true, isSnoozed: true }),
+    ).toBe("archived");
+  });
+
+  it("prefers pinned over archived and snoozed (defensive priority)", () => {
+    // The server's XOR rules make pinned + archived impossible at the
+    // session level, but a multi-session workspace can still surface
+    // both via the any-pinned / any-archived aggregators. The state
+    // function picks pinned so the menu does not show contradictory
+    // toggles.
+    expect(
+      triageStateOf({ isPinned: true, isArchived: true, isSnoozed: false }),
+    ).toBe("pinned");
+    expect(
+      triageStateOf({ isPinned: true, isArchived: false, isSnoozed: true }),
+    ).toBe("pinned");
+  });
+});
+
+describe("triageMenuShape", () => {
+  it("a live row offers Pin / Archive / Snooze and no 'Un…' toggles", () => {
+    const shape = triageMenuShape("live");
+    expect(shape.showPin).toBe(true);
+    expect(shape.showArchive).toBe(true);
+    expect(shape.showSnooze).toBe(true);
+    expect(shape.showUnpin).toBe(false);
+    expect(shape.showUnarchive).toBe(false);
+    expect(shape.showUnsnooze).toBe(false);
+  });
+
+  it("a pinned row only offers Unpin", () => {
+    // Regression: a pinned row used to show Archive and Snooze
+    // alongside Unpin, letting the user trigger contradictory
+    // transitions from the menu. See #1581.
+    const shape = triageMenuShape("pinned");
+    expect(shape.showUnpin).toBe(true);
+    expect(shape.showPin).toBe(false);
+    expect(shape.showArchive).toBe(false);
+    expect(shape.showUnarchive).toBe(false);
+    expect(shape.showSnooze).toBe(false);
+    expect(shape.showUnsnooze).toBe(false);
+  });
+
+  it("an archived row only offers Unarchive", () => {
+    // Regression: an archived row used to show Pin and Snooze in
+    // the same menu. See #1581.
+    const shape = triageMenuShape("archived");
+    expect(shape.showUnarchive).toBe(true);
+    expect(shape.showPin).toBe(false);
+    expect(shape.showUnpin).toBe(false);
+    expect(shape.showArchive).toBe(false);
+    expect(shape.showSnooze).toBe(false);
+    expect(shape.showUnsnooze).toBe(false);
+  });
+
+  it("a snoozed row only offers Unsnooze", () => {
+    const shape = triageMenuShape("snoozed");
+    expect(shape.showUnsnooze).toBe(true);
+    expect(shape.showPin).toBe(false);
+    expect(shape.showUnpin).toBe(false);
+    expect(shape.showArchive).toBe(false);
+    expect(shape.showUnarchive).toBe(false);
+    expect(shape.showSnooze).toBe(false);
   });
 });
 

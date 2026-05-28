@@ -10,7 +10,7 @@ import {
   type MutableRefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { Clock, ListOrdered, Pencil } from "lucide-react";
+import { Archive, Clock, ListOrdered, Moon, Pencil, Pin } from "lucide-react";
 import {
   DndContext,
   MouseSensor,
@@ -46,17 +46,50 @@ import {
   isSessionActive,
 } from "../lib/session";
 import { useIdleDecayWindowMs } from "../lib/idleDecay";
-import { renameSession, setSessionNotifications } from "../lib/api";
+import {
+  renameSession,
+  setSessionArchive,
+  setSessionNotifications,
+  setSessionPin,
+  setSessionSnooze,
+} from "../lib/api";
 import { useServerDown, OFFLINE_TITLE } from "../lib/connectionState";
 import { useHasDraftForSessions } from "../lib/cockpitDrafts";
-import type { SidebarSortMode } from "../lib/sidebarSort";
+import { reportError } from "../lib/toastBus";
+import {
+  resolveEffectiveSnoozedUntil,
+  snoozeTimestampCloseEnough,
+  triageMenuShape,
+  triageStateOf,
+  workspaceIsPinned,
+  workspaceIsSunk,
+  type SidebarSortMode,
+} from "../lib/sidebarSort";
 import { StatusGlyph } from "./StatusGlyph";
 import { OwnerAvatar } from "./OwnerAvatar";
 
 const SIDEBAR_WIDTH_KEY = "aoe-sidebar-width";
+const SUNK_EXPANDED_KEY = "aoe-sidebar-sunk-expanded";
 const DEFAULT_WIDTH = 280;
 const MIN_WIDTH = 200;
 const MAX_WIDTH = 480;
+
+/** Snooze duration presets surfaced by the sidebar context menu. Order
+ *  and values mirror the TUI dialog presets at
+ *  `src/tui/dialogs/snooze_duration.rs`, so the two surfaces describe
+ *  the same set of choices. The TUI extends past these via a manual
+ *  numeric entry; the web sidebar omits that path in v1 (the menu
+ *  stays flat). See #1581. */
+export const SNOOZE_PRESETS: readonly { label: string; minutes: number }[] = [
+  { label: "1 hour", minutes: 60 },
+  { label: "2 hours", minutes: 120 },
+  { label: "3 hours", minutes: 180 },
+  { label: "4 hours", minutes: 240 },
+  { label: "5 hours", minutes: 300 },
+  { label: "6 hours", minutes: 360 },
+  { label: "1 day", minutes: 1440 },
+  { label: "1 week", minutes: 10080 },
+];
 
 // Module-level bus for closing any open SessionRow context menu when a
 // new one opens. Each SessionRow manages its own menu state; without
@@ -141,6 +174,17 @@ function loadSavedWidth(): number {
     if (w >= MIN_WIDTH && w <= MAX_WIDTH) return w;
   }
   return DEFAULT_WIDTH;
+}
+
+/** Hydrate the single global "Snoozed & archived" footer expanded
+ *  state from localStorage. Defaults to collapsed (TUI parity with
+ *  the `toggle_archived_section` keybind starting collapsed). An
+ *  earlier iteration kept a per-group dict here; any leftover dict
+ *  is treated as collapsed. */
+function loadSunkExpanded(): boolean {
+  const raw = safeGetItem(SUNK_EXPANDED_KEY);
+  if (raw === "true") return true;
+  return false;
 }
 
 /** One-line sidebar affordance showing plan progress for cockpit
@@ -233,6 +277,41 @@ function formatDurationSecondsShort(seconds: number): string {
   return remM === 0 ? `${h}h` : `${h}h ${remM}m`;
 }
 
+/** Wall-clock target for an optimistic snooze: `Date.now() + minutes
+ *  * 60_000` as an RFC3339 ISO string. Sits outside the component so
+ *  the `Date.now()` call doesn't trip
+ *  `react-hooks/purity`; the event handler that calls it is itself a
+ *  closure, not a render. The exact value is throwaway (the server's
+ *  response on the next poll is the source of truth), so a few ms
+ *  of jitter is harmless. See #1581. */
+export function makeOptimisticSnoozedUntil(minutes: number): string {
+  return new Date(Date.now() + minutes * 60_000).toISOString();
+}
+
+/** Compact "time remaining" label for the snooze chip computed once at
+ *  render time (no per-second timer, by design: snooze rows poll the
+ *  sessions API at the existing cadence and the static label is more
+ *  battery-friendly than a 1s ticker on phones, see #1581 design
+ *  discussion). Bucket sizes:
+ *   - < 1 minute : "<1m"
+ *   - < 1 hour   : "Nm"
+ *   - < 1 day    : "Nh" (rounded down)
+ *   - else       : "Nd" (rounded down)
+ *  Past timestamps return "soon" since the wake-up has expired but the
+ *  next poll has not yet cleared the row. */
+export function formatSnoozeRemainingShort(snoozedUntilIso: string): string {
+  const target = Date.parse(snoozedUntilIso);
+  if (!Number.isFinite(target)) return "snoozed";
+  const remainingMs = target - Date.now();
+  if (remainingMs <= 0) return "soon";
+  const minutes = Math.floor(remainingMs / 60_000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 // Wraps a SessionRow with @dnd-kit sortable plumbing. The row itself
 // is the drag handle: a short tap/click navigates as before, but a
 // press-and-hold (sensor delay) lifts the row so the user can reorder.
@@ -244,7 +323,7 @@ function formatDurationSecondsShort(seconds: number): string {
 // see each other through a module-scoped global. The document
 // listener checks `ref.current` on every click; rows write to it
 // while dragging and on release.
-const DragSuppressContext = createContext<MutableRefObject<number> | null>(null);
+export const DragSuppressContext = createContext<MutableRefObject<number> | null>(null);
 function useDragSuppressRef(): MutableRefObject<number> {
   const ref = useContext(DragSuppressContext);
   if (!ref) {
@@ -361,7 +440,7 @@ function SortableSessionRow(props: {
   );
 }
 
-const SessionRow = memo(function SessionRow({
+export const SessionRow = memo(function SessionRow({
   workspace,
   isActive,
   onClick,
@@ -410,6 +489,15 @@ const SessionRow = memo(function SessionRow({
   // row visually so the user can find their starred work fast. Toggled
   // via TUI `f`/`F` or `aoe session favorite|unfavorite`.
   const isFavorited = workspace.sessions.some((s) => s.favorited);
+  // Web-only triage signals. `pinned` floats the workspace to the top
+  // of every sort mode; `archived` and `snoozedUntil` mark the row as
+  // sunk (the parent splits sunk workspaces into a separate collapsible
+  // section). Aggregators mirror the matching helpers in
+  // `lib/sidebarSort.ts` to keep render and sort in sync. See #1581.
+  const isPinned = workspace.sessions.some((s) => s.pinned_at != null);
+  const isArchived = workspace.sessions.some((s) => s.archived_at != null);
+  const snoozedUntil = workspace.sessions.find((s) => s.snoozed_until)
+    ?.snoozed_until ?? null;
   const sessionId = firstSession?.id;
   const navigationSessionId = runningSession?.id ?? firstSession?.id ?? null;
   const sessionPath = navigationSessionId
@@ -436,6 +524,126 @@ const SessionRow = memo(function SessionRow({
     if (!sessionId || preset === notifyPreset) return;
     await setSessionNotifications(sessionId, preset);
   };
+
+  // Triage actions (pin / archive / snooze). Optimistic state lets the
+  // glyph, chip, and tier flip immediately on click; on PATCH failure we
+  // revert and surface a toast. The optimistic snap clears itself once
+  // the next sessions-poll reflects the same value, so a successful
+  // round-trip is invisible to the user (just feels fast).
+  const [optimisticPinned, setOptimisticPinned] = useState<boolean | null>(
+    null,
+  );
+  const [optimisticArchived, setOptimisticArchived] = useState<boolean | null>(
+    null,
+  );
+  // Optimistic `snoozed_until` override. `undefined` = no override
+  // (use the prop), a string = pretend the server already returned
+  // this RFC3339 timestamp, `null` = pretend the server already
+  // unsnoozed. Clears once the prop matches the override on the next
+  // poll, matching the pin / archive pattern above.
+  const [optimisticSnoozedUntil, setOptimisticSnoozedUntil] = useState<
+    string | null | undefined
+  >(undefined);
+  // Snooze duration picker. Lives in its own portal-rendered modal,
+  // independent of the context menu's lifecycle so the parent-menu
+  // dismissal listener cannot close the picker out from under us.
+  const [snoozeModalOpen, setSnoozeModalOpen] = useState(false);
+  useEffect(() => {
+    if (optimisticPinned !== null && optimisticPinned === isPinned) {
+      setOptimisticPinned(null);
+    }
+  }, [isPinned, optimisticPinned]);
+  useEffect(() => {
+    if (optimisticArchived !== null && optimisticArchived === isArchived) {
+      setOptimisticArchived(null);
+    }
+  }, [isArchived, optimisticArchived]);
+  useEffect(() => {
+    if (optimisticSnoozedUntil === undefined) return;
+    // Clear the override only when the server value actually matches
+    // it. A naive "both non-null" check used to fire prematurely
+    // when the user re-snoozed an already-snoozed row: the prop
+    // was still the OLD timestamp but non-null, the override was
+    // the NEW timestamp, the effect treated them as a match, and
+    // the chip snapped back to the stale time until the next
+    // poll. See #1581 CodeRabbit review.
+    if (optimisticSnoozedUntil === null && snoozedUntil == null) {
+      setOptimisticSnoozedUntil(undefined);
+      return;
+    }
+    if (
+      optimisticSnoozedUntil != null &&
+      snoozedUntil != null &&
+      snoozeTimestampCloseEnough(optimisticSnoozedUntil, snoozedUntil)
+    ) {
+      setOptimisticSnoozedUntil(undefined);
+    }
+  }, [snoozedUntil, optimisticSnoozedUntil]);
+
+  const togglePin = async () => {
+    setContextMenu(null);
+    if (!sessionId) return;
+    const next = !isPinned;
+    setOptimisticPinned(next);
+    const result = await setSessionPin(sessionId, next);
+    if (!result) {
+      setOptimisticPinned(null);
+      reportError(next ? "Failed to pin session" : "Failed to unpin session");
+    }
+  };
+
+  const toggleArchive = async () => {
+    setContextMenu(null);
+    if (!sessionId) return;
+    const next = !isArchived;
+    setOptimisticArchived(next);
+    const result = await setSessionArchive(sessionId, next);
+    if (!result) {
+      setOptimisticArchived(null);
+      reportError(
+        next ? "Failed to archive session" : "Failed to unarchive session",
+      );
+    }
+  };
+
+  const applySnooze = async (minutes: number | null) => {
+    setContextMenu(null);
+    setSnoozeModalOpen(false);
+    if (!sessionId) return;
+    // Optimistic flip: render the snooze chip + sink the row before
+    // the PATCH round-trip lands, matching the pin / archive
+    // affordance. For positive minutes we synthesise a target
+    // timestamp; the server is the source of truth and the value is
+    // discarded on the next poll, so a few ms of drift is harmless.
+    const optimisticUntil =
+      minutes == null ? null : makeOptimisticSnoozedUntil(minutes);
+    setOptimisticSnoozedUntil(optimisticUntil);
+    const result = await setSessionSnooze(sessionId, minutes);
+    if (!result) {
+      setOptimisticSnoozedUntil(undefined);
+      reportError(
+        minutes == null ? "Failed to unsnooze session" : "Failed to snooze session",
+      );
+    }
+  };
+
+  // Close the context menu first, then open the modal in the next
+  // tick so the menu's document-click dismiss listener does not race
+  // with the modal's mount.
+  const openSnoozeModal = () => {
+    setContextMenu(null);
+    setSnoozeModalOpen(true);
+  };
+
+  // Effective state for rendering: optimistic overrides win until the
+  // prop catches up (cleared in the effects above).
+  const effectivePinned = optimisticPinned ?? isPinned;
+  const effectiveArchived = optimisticArchived ?? isArchived;
+  const effectiveSnoozedUntil = resolveEffectiveSnoozedUntil(
+    optimisticSnoozedUntil,
+    snoozedUntil,
+  );
+  const effectiveSnoozed = effectiveSnoozedUntil != null;
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState(false);
@@ -617,7 +825,16 @@ const SessionRow = memo(function SessionRow({
             />
           </span>
           <div className="min-w-0 flex-1">
-            <span className={`flex items-center gap-1.5 text-[13px] md:text-[14px] ${isSessionActive({ status: sessionStatus, idle_entered_at: idleEnteredAt }, idleDecayWindowMs) ? textClass : isActive ? "text-text-primary" : "text-text-secondary"} ${isFavorited ? "font-semibold" : ""}`}>
+            <span className={`flex items-center gap-1.5 text-[13px] md:text-[14px] ${isSessionActive({ status: sessionStatus, idle_entered_at: idleEnteredAt }, idleDecayWindowMs) ? textClass : isActive ? "text-text-primary" : "text-text-secondary"} ${isFavorited || effectivePinned ? "font-semibold" : ""} ${effectiveArchived || effectiveSnoozed ? "italic opacity-70" : ""}`}>
+              {effectivePinned && (
+                <span
+                  title="Pinned"
+                  aria-label="Pinned"
+                  className="shrink-0 inline-flex text-brand-400"
+                >
+                  <Pin className="h-3 w-3 -rotate-45" />
+                </span>
+              )}
               {isFavorited && (
                 <span
                   title="Favorited"
@@ -635,6 +852,26 @@ const SessionRow = memo(function SessionRow({
                   className="inline-flex shrink-0"
                 >
                   <Pencil className="h-3 w-3 text-amber-400/90" />
+                </span>
+              )}
+              {effectiveArchived && (
+                <span
+                  title="Archived"
+                  aria-label="Archived"
+                  className="shrink-0 inline-flex items-center gap-0.5 rounded border border-surface-700/40 bg-surface-800/40 px-1 py-0 text-[10px] font-mono font-medium text-text-dim"
+                >
+                  <Archive className="h-3 w-3" />
+                  <span className="hidden sm:inline">archived</span>
+                </span>
+              )}
+              {!effectiveArchived && effectiveSnoozed && effectiveSnoozedUntil && (
+                <span
+                  title={`Snoozed until ${new Date(effectiveSnoozedUntil).toLocaleString()}`}
+                  aria-label="Snoozed"
+                  className="shrink-0 inline-flex items-center gap-0.5 rounded border border-surface-700/40 bg-surface-800/40 px-1 py-0 text-[10px] font-mono font-medium text-text-dim"
+                >
+                  <Moon className="h-3 w-3" />
+                  <span>{formatSnoozeRemainingShort(effectiveSnoozedUntil)}</span>
                 </span>
               )}
               {firstSession?.cockpit_mode &&
@@ -742,6 +979,89 @@ const SessionRow = memo(function SessionRow({
           {!readOnly && (
             <>
               <div className="border-t border-surface-700/20 my-1" />
+              <div className="px-3 py-1 text-[11px] font-mono uppercase tracking-widest text-text-muted">
+                Triage
+              </div>
+              {(() => {
+                // Menu actions are gated by the row's current triage
+                // state so contradictory transitions never appear in
+                // the UI: an archived row only offers Unarchive, a
+                // pinned row only offers Unpin, etc. The shape helper
+                // lives in `lib/sidebarSort.ts` so it can be unit
+                // tested. See #1581.
+                const shape = triageMenuShape(
+                  triageStateOf({
+                    isPinned: effectivePinned,
+                    isArchived: effectiveArchived,
+                    isSnoozed: effectiveSnoozed,
+                  }),
+                );
+                return (
+                  <>
+                    {shape.showPin && (
+                      <button
+                        onClick={() => void togglePin()}
+                        data-testid="sidebar-context-menu-pin"
+                        className="w-full text-left pl-6 pr-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2"
+                      >
+                        <Pin className="h-3.5 w-3.5 shrink-0 -rotate-45" />
+                        Pin
+                      </button>
+                    )}
+                    {shape.showUnpin && (
+                      <button
+                        onClick={() => void togglePin()}
+                        data-testid="sidebar-context-menu-pin"
+                        className="w-full text-left pl-6 pr-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2"
+                      >
+                        <Pin className="h-3.5 w-3.5 shrink-0 -rotate-45" />
+                        Unpin
+                      </button>
+                    )}
+                    {shape.showArchive && (
+                      <button
+                        onClick={() => void toggleArchive()}
+                        data-testid="sidebar-context-menu-archive"
+                        className="w-full text-left pl-6 pr-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2"
+                      >
+                        <Archive className="h-3.5 w-3.5 shrink-0" />
+                        Archive
+                      </button>
+                    )}
+                    {shape.showUnarchive && (
+                      <button
+                        onClick={() => void toggleArchive()}
+                        data-testid="sidebar-context-menu-archive"
+                        className="w-full text-left pl-6 pr-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2"
+                      >
+                        <Archive className="h-3.5 w-3.5 shrink-0" />
+                        Unarchive
+                      </button>
+                    )}
+                    {shape.showSnooze && (
+                      <button
+                        onClick={openSnoozeModal}
+                        data-testid="sidebar-context-menu-snooze"
+                        className="w-full text-left pl-6 pr-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2"
+                      >
+                        <Moon className="h-3.5 w-3.5 shrink-0" />
+                        Snooze…
+                      </button>
+                    )}
+                    {shape.showUnsnooze && (
+                      <button
+                        onClick={() => void applySnooze(null)}
+                        data-testid="sidebar-context-menu-unsnooze"
+                        className="w-full text-left pl-6 pr-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2"
+                      >
+                        <Moon className="h-3.5 w-3.5 shrink-0" />
+                        Unsnooze
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
+              <div className="border-t border-surface-700/20 my-1" />
               <button
                 onClick={handleDelete}
                 data-testid="sidebar-context-menu-delete"
@@ -754,9 +1074,254 @@ const SessionRow = memo(function SessionRow({
         </div>,
         document.body,
       )}
+      {snoozeModalOpen &&
+        createPortal(
+          <SnoozeModal
+            title={label}
+            onCancel={() => setSnoozeModalOpen(false)}
+            onPick={(minutes) => void applySnooze(minutes)}
+          />,
+          document.body,
+        )}
     </>
   );
 });
+
+/** Bounds for `validate_snooze_duration` on the server. Mirrored
+ *  client-side so the modal can pre-validate and disable the submit
+ *  button rather than round-trip a 400. See
+ *  `src/session/config.rs::SNOOZE_MAX_MINUTES`. */
+const SNOOZE_MIN_MINUTES = 1;
+const SNOOZE_MAX_MINUTES = 30 * 24 * 60;
+
+type SnoozeUnit = "m" | "h" | "d" | "w";
+
+const SNOOZE_UNIT_LABELS: Record<SnoozeUnit, string> = {
+  m: "minutes",
+  h: "hours",
+  d: "days",
+  w: "weeks",
+};
+
+function snoozeUnitToMinutes(value: number, unit: SnoozeUnit): number {
+  switch (unit) {
+    case "m":
+      return value;
+    case "h":
+      return value * 60;
+    case "d":
+      return value * 60 * 24;
+    case "w":
+      return value * 60 * 24 * 7;
+  }
+}
+
+/** Centered modal duration picker rendered as a separate portal so it
+ *  is independent of the row's context menu. Three submit paths:
+ *   - 8 TUI presets (matching `src/tui/dialogs/snooze_duration.rs`).
+ *   - Custom duration: number + unit (m/h/d/w).
+ *   - Until a specific date+time (HTML5 datetime-local input).
+ *  Backdrop click and Escape both dismiss. See #1581. */
+export function SnoozeModal({
+  title,
+  onCancel,
+  onPick,
+}: {
+  title: string;
+  onCancel: () => void;
+  onPick: (minutes: number) => void;
+}) {
+  const [customValue, setCustomValue] = useState("");
+  const [customUnit, setCustomUnit] = useState<SnoozeUnit>("h");
+  const [untilValue, setUntilValue] = useState("");
+  const [customError, setCustomError] = useState<string | null>(null);
+  const [untilError, setUntilError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const submitCustom = () => {
+    setCustomError(null);
+    const n = Number.parseInt(customValue, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      setCustomError("Enter a positive whole number.");
+      return;
+    }
+    const minutes = snoozeUnitToMinutes(n, customUnit);
+    if (minutes < SNOOZE_MIN_MINUTES || minutes > SNOOZE_MAX_MINUTES) {
+      setCustomError(
+        `Must be between 1 minute and 30 days (got ${minutes} minutes).`,
+      );
+      return;
+    }
+    onPick(minutes);
+  };
+
+  const submitUntil = () => {
+    setUntilError(null);
+    if (!untilValue) {
+      setUntilError("Pick a date and time.");
+      return;
+    }
+    // datetime-local values are wall-clock (no zone). Date.parse
+    // interprets them as local time, which matches user expectation
+    // (snooze "until 9am tomorrow" means 9am in the user's TZ).
+    const target = Date.parse(untilValue);
+    if (!Number.isFinite(target)) {
+      setUntilError("Invalid date.");
+      return;
+    }
+    const deltaMs = target - Date.now();
+    if (deltaMs <= 0) {
+      setUntilError("Pick a time in the future.");
+      return;
+    }
+    const minutes = Math.max(1, Math.round(deltaMs / 60_000));
+    if (minutes > SNOOZE_MAX_MINUTES) {
+      setUntilError("Maximum snooze is 30 days from now.");
+      return;
+    }
+    onPick(minutes);
+  };
+
+  return (
+    <div
+      data-testid="snooze-modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onCancel();
+      }}
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 px-4 py-8 overflow-y-auto"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Snooze session"
+    >
+      <div
+        data-testid="snooze-modal"
+        className="w-full max-w-sm rounded-lg border border-surface-700 bg-surface-800 shadow-xl"
+      >
+        <div className="px-4 py-3 border-b border-surface-700/40">
+          <div className="text-sm font-mono text-text-primary truncate" title={title}>
+            Snooze
+            <span className="text-text-muted"> · {title}</span>
+          </div>
+          <div className="mt-1 text-[11px] text-text-dim">
+            How long should this session sit out?
+          </div>
+        </div>
+        <div className="flex flex-col py-2">
+          {SNOOZE_PRESETS.map((preset) => (
+            <button
+              key={preset.minutes}
+              onClick={() => onPick(preset.minutes)}
+              data-testid={`snooze-modal-preset-${preset.minutes}`}
+              className="w-full text-left px-4 py-2 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors"
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+        <div className="px-4 py-3 border-t border-surface-700/40">
+          <div className="text-[11px] font-mono uppercase tracking-widest text-text-muted mb-2">
+            Custom duration
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              value={customValue}
+              onChange={(e) => setCustomValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitCustom();
+              }}
+              placeholder="3"
+              data-testid="snooze-modal-custom-value"
+              aria-label="Custom snooze duration"
+              className="w-20 rounded border border-surface-700 bg-surface-900 px-2 py-1 text-sm text-text-primary focus:border-brand-600 focus:outline-none"
+            />
+            <select
+              value={customUnit}
+              onChange={(e) => setCustomUnit(e.target.value as SnoozeUnit)}
+              data-testid="snooze-modal-custom-unit"
+              aria-label="Custom snooze unit"
+              className="rounded border border-surface-700 bg-surface-900 px-2 py-1 text-sm text-text-primary focus:border-brand-600 focus:outline-none"
+            >
+              {(Object.keys(SNOOZE_UNIT_LABELS) as SnoozeUnit[]).map((u) => (
+                <option key={u} value={u}>
+                  {SNOOZE_UNIT_LABELS[u]}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={submitCustom}
+              data-testid="snooze-modal-custom-submit"
+              className="ml-auto rounded bg-brand-600 px-3 py-1 text-sm font-medium text-text-primary hover:bg-brand-500 cursor-pointer transition-colors"
+            >
+              Snooze
+            </button>
+          </div>
+          {customError && (
+            <div
+              role="alert"
+              data-testid="snooze-modal-custom-error"
+              className="mt-1 text-[11px] text-status-error"
+            >
+              {customError}
+            </div>
+          )}
+        </div>
+        <div className="px-4 py-3 border-t border-surface-700/40">
+          <div className="text-[11px] font-mono uppercase tracking-widest text-text-muted mb-2">
+            Until
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="datetime-local"
+              value={untilValue}
+              onChange={(e) => setUntilValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitUntil();
+              }}
+              data-testid="snooze-modal-until-value"
+              aria-label="Snooze until"
+              className="flex-1 min-w-0 rounded border border-surface-700 bg-surface-900 px-2 py-1 text-sm text-text-primary focus:border-brand-600 focus:outline-none"
+            />
+            <button
+              onClick={submitUntil}
+              data-testid="snooze-modal-until-submit"
+              className="rounded bg-brand-600 px-3 py-1 text-sm font-medium text-text-primary hover:bg-brand-500 cursor-pointer transition-colors"
+            >
+              Snooze
+            </button>
+          </div>
+          {untilError && (
+            <div
+              role="alert"
+              data-testid="snooze-modal-until-error"
+              className="mt-1 text-[11px] text-status-error"
+            >
+              {untilError}
+            </div>
+          )}
+        </div>
+        <div className="px-4 py-3 border-t border-surface-700/40 flex justify-end">
+          <button
+            onClick={onCancel}
+            data-testid="snooze-modal-cancel"
+            className="text-sm text-text-dim hover:text-text-primary cursor-pointer transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const RepoGroupHeader = memo(function RepoGroupHeader({
   group,
@@ -1033,6 +1598,14 @@ export function WorkspaceSidebar({
   const [width, setWidth] = useState(loadSavedWidth);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
+  const [sunkExpanded, setSunkExpanded] = useState<boolean>(loadSunkExpanded);
+  const toggleSunkExpanded = useCallback(() => {
+    setSunkExpanded((prev) => {
+      const next = !prev;
+      safeSetItem(SUNK_EXPANDED_KEY, next ? "true" : "false");
+      return next;
+    });
+  }, []);
   const [optimisticActive, setOptimisticActive] = useState<{
     id: string;
     fromActiveId: string | null;
@@ -1301,32 +1874,118 @@ export function WorkspaceSidebar({
                     }
                     offline={offline}
                   />
-                  {showExpanded && (
-                    <SortableContext
-                      items={group.workspaces.map((ws) => ws.id)}
-                      strategy={verticalListSortingStrategy}
-                    >
-                      {group.workspaces.map((ws) => (
-                        <SortableSessionRow
-                          key={ws.id}
-                          workspace={ws}
-                          isActive={ws.id === displayedActiveId}
-                          onClick={() => {
-                            setOptimisticActive({ id: ws.id, fromActiveId: activeId });
-                            onSelect(ws.id);
-                          }}
-                          onDelete={onDeleteSession}
-                          readOnly={readOnly}
-                          dragDisabled={sortMode === "lastActivity"}
-                        />
-                      ))}
-                    </SortableContext>
-                  )}
+                  {showExpanded && (() => {
+                    // Each group renders only its live tier. Sunk
+                    // workspaces (archived or actively snoozed across
+                    // every session) are pulled out into a single
+                    // global "Snoozed & archived" section at the very
+                    // bottom of the sidebar, rather than one footer
+                    // per repo group. See #1581.
+                    const liveWorkspaces = group.workspaces.filter(
+                      (ws) => !workspaceIsSunk(ws),
+                    );
+                    return (
+                      <SortableContext
+                        items={liveWorkspaces.map((ws) => ws.id)}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        {liveWorkspaces.map((ws) => (
+                          <SortableSessionRow
+                            key={ws.id}
+                            workspace={ws}
+                            isActive={ws.id === displayedActiveId}
+                            onClick={() => {
+                              setOptimisticActive({
+                                id: ws.id,
+                                fromActiveId: activeId,
+                              });
+                              onSelect(ws.id);
+                            }}
+                            onDelete={onDeleteSession}
+                            readOnly={readOnly}
+                            // Drag is disabled when the tier comparator
+                            // already controls placement: lastActivity
+                            // mode has no manual concept, pinned rows
+                            // always float to the top of their group.
+                            // See #1581.
+                            dragDisabled={
+                              sortMode === "lastActivity" ||
+                              workspaceIsPinned(ws)
+                            }
+                          />
+                        ))}
+                      </SortableContext>
+                    );
+                  })()}
                 </div>
               );
             })}
           </DndContext>
           </DragSuppressContext.Provider>
+          {(() => {
+            // Single global "Snoozed & archived" section at the very
+            // bottom of the sidebar. Aggregates sunk workspaces from
+            // every repo group (live filtered) so users see one
+            // collapsible bucket rather than one footer per repo.
+            // Rows are listed flat in the order they appear inside
+            // their respective groups; each row's SessionRow already
+            // surfaces the title/branch/repo chips that anchor it to
+            // its project. See #1581.
+            const sunkWorkspaces = filteredGroups.flatMap((g) =>
+              g.workspaces.filter(workspaceIsSunk),
+            );
+            if (sunkWorkspaces.length === 0) return null;
+            return (
+              <div data-testid="sidebar-sunk-section">
+                <button
+                  onClick={toggleSunkExpanded}
+                  data-testid="sidebar-sunk-toggle"
+                  aria-expanded={sunkExpanded}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] font-mono uppercase tracking-widest text-text-muted hover:text-text-secondary hover:bg-surface-800/40 cursor-pointer transition-colors border-t border-surface-800/60"
+                >
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 10 10"
+                    fill="currentColor"
+                    className={`shrink-0 transition-transform duration-75 ${
+                      sunkExpanded ? "" : "-rotate-90"
+                    }`}
+                  >
+                    <path
+                      d="M2 3 L5 6.5 L8 3"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span>
+                    Snoozed &amp; archived ({sunkWorkspaces.length})
+                  </span>
+                </button>
+                {sunkExpanded &&
+                  sunkWorkspaces.map((ws) => (
+                    <SessionRow
+                      key={ws.id}
+                      workspace={ws}
+                      isActive={ws.id === displayedActiveId}
+                      onClick={() => {
+                        setOptimisticActive({
+                          id: ws.id,
+                          fromActiveId: activeId,
+                        });
+                        onSelect(ws.id);
+                      }}
+                      onDelete={onDeleteSession}
+                      readOnly={readOnly}
+                      indented
+                    />
+                  ))}
+              </div>
+            );
+          })()}
 
           {!hasResults && filterQuery && (
             <div className="px-4 py-8 text-center">
