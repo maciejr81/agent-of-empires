@@ -4,6 +4,49 @@ All notable changes to Agent of Empires will be documented in this file.
 
 The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [1.9.4](https://github.com/agent-of-empires/agent-of-empires/releases/tag/v1.9.4) - 2026-05-28
+
+
+
+### Bug Fixes
+
+- **tui:** Wrap multiline live-send pastes in bracketed paste markers in [#1553](https://github.com/agent-of-empires/agent-of-empires/pull/1553) by [@njbrake](https://github.com/njbrake) ([`26f5a39`](https://github.com/agent-of-empires/agent-of-empires/commit/26f5a394e0e6e3bc798d995f93b64511718b69be))
+- **tui:** Wrap settings descriptions instead of clipping them in [#1552](https://github.com/agent-of-empires/agent-of-empires/pull/1552) by [@njbrake](https://github.com/njbrake) ([`80370ef`](https://github.com/agent-of-empires/agent-of-empires/commit/80370ef47a7f8970542fad6bd74dfe3811c62055))
+- **session:** Anchor Claude session poller to its own session id in [#1523](https://github.com/agent-of-empires/agent-of-empires/pull/1523) by [@itisaevalex](https://github.com/itisaevalex) ([`bbceca5`](https://github.com/agent-of-empires/agent-of-empires/commit/bbceca582f500179ae7bfe6c58a2e7a9856a5b44))
+- **tui:** Route 'm' and live mode to the paired terminal pane in Terminal view in [#1561](https://github.com/agent-of-empires/agent-of-empires/pull/1561) by [@njbrake](https://github.com/njbrake) ([`ef9ac2d`](https://github.com/agent-of-empires/agent-of-empires/commit/ef9ac2dd5ec2272e8c11a9086f97555f2e2ecfc9))
+- **tui:** Prune source profile's empty group after restart-to-different-profile in [#1463](https://github.com/agent-of-empires/agent-of-empires/pull/1463) by [@BTForIT](https://github.com/BTForIT) ([`828bc3a`](https://github.com/agent-of-empires/agent-of-empires/commit/828bc3a4c476fb25d4cf6843f05bf32f252dbaae))
+- **tui:** Show correct Enter/Tab labels in help overlay in [#1567](https://github.com/agent-of-empires/agent-of-empires/pull/1567) by [@njbrake](https://github.com/njbrake) ([`ab37c7f`](https://github.com/agent-of-empires/agent-of-empires/commit/ab37c7f59437117f5dcfd74d0186faf50dbc470f))
+- **tui:** Size preview pane around info panel + add i toggle to Terminal/Tool views in [#1570](https://github.com/agent-of-empires/agent-of-empires/pull/1570) by [@njbrake](https://github.com/njbrake) ([`4a8fa5c`](https://github.com/agent-of-empires/agent-of-empires/commit/4a8fa5ce0d5885c04dafbbe4a757ec30b83e946a))
+- **tui:** Make w jump to next waiting in Attention in [#1571](https://github.com/agent-of-empires/agent-of-empires/pull/1571) by [@grepsedawk](https://github.com/grepsedawk) ([`57833ed`](https://github.com/agent-of-empires/agent-of-empires/commit/57833ed420857f30269af2477a6a094cd744c323))
+- **web:** Use bracketed paste for Shift+Enter in terminal in [#1560](https://github.com/agent-of-empires/agent-of-empires/pull/1560) by [@Eric162](https://github.com/Eric162) ([`16d91ad`](https://github.com/agent-of-empires/agent-of-empires/commit/16d91ad76450c54a3f2709db631118dd67504a09))
+- **web:** Cut first-session-open WS retry storm from ~60s to <5s in [#1577](https://github.com/agent-of-empires/agent-of-empires/pull/1577) by [@Seluj78](https://github.com/Seluj78) ([`539aadc`](https://github.com/agent-of-empires/agent-of-empires/commit/539aadce01e367b68a427911399a42a3d73cc06a))
+- **server,web:** Theme picker reverts after reload, narrow elevation gate to safe preference fields in [#1575](https://github.com/agent-of-empires/agent-of-empires/pull/1575) by [@Seluj78](https://github.com/Seluj78) ([`3990cd5`](https://github.com/agent-of-empires/agent-of-empires/commit/3990cd50504836464eac125bafa6a55e1a4b6a0d))
+- **cockpit:** Always append trailing space when picking slash command in [#1573](https://github.com/agent-of-empires/agent-of-empires/pull/1573) by [@Seluj78](https://github.com/Seluj78) ([`e99d7a0`](https://github.com/agent-of-empires/agent-of-empires/commit/e99d7a076ad34ab0d9c413b47d10743f0c86933e))
+- **worktree:** Surface fetch failures and apply canonical-remote scoring to explicit base branch in [#1574](https://github.com/agent-of-empires/agent-of-empires/pull/1574) by [@Seluj78](https://github.com/Seluj78) ([`4b27693`](https://github.com/agent-of-empires/agent-of-empires/commit/4b27693ab31958585ed6e9b831435f74d9db9e64))
+- **session:** Keep stopped sessions stopped across aoe relaunches in [#1586](https://github.com/agent-of-empires/agent-of-empires/pull/1586) by [@njbrake](https://github.com/njbrake) ([`9a58c04`](https://github.com/agent-of-empires/agent-of-empires/commit/9a58c0402b965b7477f524d6cc4e0b020d71c116))
+- **ci:** Build linux releases inside manylinux_2_28 for portable glibc floor in [#1584](https://github.com/agent-of-empires/agent-of-empires/pull/1584) by [@njbrake](https://github.com/njbrake) ([`5849635`](https://github.com/agent-of-empires/agent-of-empires/commit/584963592e0c72f84a7bfcbd72e5e62e0b6153e9))
+- **ci:** Gate release workflows behind a required-reviewer environment in [#1594](https://github.com/agent-of-empires/agent-of-empires/pull/1594) by [@njbrake](https://github.com/njbrake) ([`12f65ed`](https://github.com/agent-of-empires/agent-of-empires/commit/12f65edcdbc30e3c17063cf3337e82deb2f90992))
+
+
+### Features
+
+- **web:** Add opt-in last-activity sort mode to sidebar (#1418) in [#1547](https://github.com/agent-of-empires/agent-of-empires/pull/1547) by [@Seluj78](https://github.com/Seluj78) ([`18f9d09`](https://github.com/agent-of-empires/agent-of-empires/commit/18f9d092a7ada12df93c9e5e8700ee1a7bf2fc81))
+- **tui:** Allow preview drag-select outside live mode in [#1556](https://github.com/agent-of-empires/agent-of-empires/pull/1556) by [@njbrake](https://github.com/njbrake) ([`a364cdf`](https://github.com/agent-of-empires/agent-of-empires/commit/a364cdf750d91a9602c9ea4d2617cfd35a2866cd))
+- **tui:** Nest Archived section by project and persist auto-unsink on re-enter in [#1557](https://github.com/agent-of-empires/agent-of-empires/pull/1557) by [@njbrake](https://github.com/njbrake) ([`65c1f1b`](https://github.com/agent-of-empires/agent-of-empires/commit/65c1f1bf99742acc9cedf0bc46cd180b74e403a9))
+- **cockpit:** Model picker + reasoning effort selector (#1403) in [#1548](https://github.com/agent-of-empires/agent-of-empires/pull/1548) by [@Seluj78](https://github.com/Seluj78) ([`fd954f3`](https://github.com/agent-of-empires/agent-of-empires/commit/fd954f39dabb57e25c31a276146009cba379881a))
+- Scratch-directory toggle for new sessions in [#1549](https://github.com/agent-of-empires/agent-of-empires/pull/1549) by [@Seluj78](https://github.com/Seluj78) ([`1c17f53`](https://github.com/agent-of-empires/agent-of-empires/commit/1c17f53428f08fe299b49e4fcdb8e9c054edf054))
+- **web:** Pin, archive, and snooze triage on the sidebar in [#1585](https://github.com/agent-of-empires/agent-of-empires/pull/1585) by [@Seluj78](https://github.com/Seluj78) ([`f73cb94`](https://github.com/agent-of-empires/agent-of-empires/commit/f73cb948535c567f986a14a153defdf2d5f23a83))
+- **cockpit:** Bump claude-agent-acp floor to 0.38.0 for Opus 4.8 support in [#1603](https://github.com/agent-of-empires/agent-of-empires/pull/1603) by [@Seluj78](https://github.com/Seluj78) ([`75a8ee0`](https://github.com/agent-of-empires/agent-of-empires/commit/75a8ee0bf10f6f8b1d1d95d156eec156cdccfe60))
+
+
+
+### New Contributors
+
+- [@Eric162](https://github.com/Eric162) made their first contribution in [#1560](https://github.com/agent-of-empires/agent-of-empires/pull/1560)
+- [@grepsedawk](https://github.com/grepsedawk) made their first contribution in [#1571](https://github.com/agent-of-empires/agent-of-empires/pull/1571)
+- [@itisaevalex](https://github.com/itisaevalex) made their first contribution in [#1523](https://github.com/agent-of-empires/agent-of-empires/pull/1523)
+
+**Full Changelog**: https://github.com/agent-of-empires/agent-of-empires/compare/v1.9.3...v1.9.4
 ## [1.9.3](https://github.com/agent-of-empires/agent-of-empires/releases/tag/v1.9.3) - 2026-05-27
 
 
