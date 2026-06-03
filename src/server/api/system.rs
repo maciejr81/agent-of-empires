@@ -7,12 +7,12 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
+use super::validate_profile_name;
 use super::AppState;
-use super::{
-    body_requires_elevation, validate_profile_name, ALLOWED_GLOBAL_SETTINGS_SECTIONS,
-    ALLOWED_PROFILE_SETTINGS_SECTIONS, COCKPIT_BLOCKED_FIELDS, SESSION_BLOCKED_FIELDS,
-};
 use crate::server::auth::AuthenticatedSession;
+use crate::session::settings_schema::{
+    clear_path, strip_local_only, validate_patch, PatchRejection, Scope,
+};
 
 // --- Agents ---
 
@@ -129,6 +129,18 @@ pub async fn get_settings(
     }
 }
 
+/// Map a schema [`PatchRejection`] to the HTTP response shape the dashboard
+/// expects. `elevation_required` mirrors the path-shape gate's 403 so the web
+/// client's interceptor fires the passphrase prompt unchanged.
+fn reject_response(rej: PatchRejection) -> axum::response::Response {
+    let status = StatusCode::from_u16(rej.status_code()).unwrap_or(StatusCode::BAD_REQUEST);
+    (
+        status,
+        Json(serde_json::json!({"error": rej.error_code(), "message": rej.message()})),
+    )
+        .into_response()
+}
+
 pub async fn update_settings(
     State(state): State<Arc<AppState>>,
     body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
@@ -142,52 +154,27 @@ pub async fn update_settings(
         )
             .into_response();
     }
-    let Json(body) = match body {
+    let Json(mut body) = match body {
         Ok(b) => b,
         Err(rej) => return rej.into_response(),
     };
-    // Validate that only allowed sections are being updated. Use the
-    // narrower global allowlist here (no `description`, which is profile-only).
-    if let Some(obj) = body.as_object() {
-        for key in obj.keys() {
-            if !ALLOWED_GLOBAL_SETTINGS_SECTIONS.contains(&key.as_str()) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "validation_failed",
-                        "message": format!("Settings section '{}' is not allowed via the web API.", key)
-                    })),
-                )
-                    .into_response();
-            }
-        }
+    // Strip host-execution surfaces (`local_only`: node_path, agent
+    // argv/command, status-hook commands) before anything else, so a bundled
+    // or echoed-back patch keeps its safe leaves and silently drops the
+    // local-only ones (#1692). They can never reach disk from the web.
+    strip_local_only(&mut body);
+    // Validate every remaining leaf against the schema (single source of
+    // truth): unknown section/field -> 400, bad value -> 400. `PATCH
+    // /api/settings` is already elevation-gated by the auth middleware, so any
+    // field reaching here is treated as elevated.
+    if let Err(rej) = validate_patch(&body, Scope::Global, true) {
+        return reject_response(rej);
     }
 
     let result = tokio::task::spawn_blocking(move || {
         let config = crate::session::Config::load_or_warn();
         let mut current = serde_json::to_value(&config)?;
-        if let (Some(current_obj), Some(update_obj)) = (current.as_object_mut(), body.as_object()) {
-            for (key, value) in update_obj {
-                let mut value = value.clone();
-                // Strip blocked fields from session section
-                if key == "session" {
-                    if let Some(session_obj) = value.as_object_mut() {
-                        for blocked in SESSION_BLOCKED_FIELDS {
-                            session_obj.remove(*blocked);
-                        }
-                    }
-                }
-                // Strip blocked fields from cockpit section (node_path).
-                if key == "cockpit" {
-                    if let Some(cockpit_obj) = value.as_object_mut() {
-                        for blocked in COCKPIT_BLOCKED_FIELDS {
-                            cockpit_obj.remove(*blocked);
-                        }
-                    }
-                }
-                current_obj.insert(key.clone(), value);
-            }
-        }
+        crate::session::settings_schema::merge_json(&mut current, &body);
         let config: crate::session::Config = serde_json::from_value(current)?;
         crate::session::save_config(&config)?;
         Ok::<_, anyhow::Error>(config)
@@ -235,6 +222,16 @@ pub async fn update_settings(
                 .into_response()
         }
     }
+}
+
+/// `GET /api/settings/schema` returns the flat list of settings field
+/// descriptors (the single source of truth, see #1692). The web dashboard
+/// renders a generic field component from this list instead of hand-written
+/// per-field JSX, so a new config field appears on the web automatically. No
+/// secrets: descriptors are pure metadata (labels, widgets, validation, write
+/// policy), so this needs no elevation, only normal authentication.
+pub async fn get_settings_schema() -> Json<Vec<crate::session::settings_schema::FieldDescriptor>> {
+    Json(crate::session::settings_schema::schema())
 }
 
 // --- Devices ---
@@ -957,7 +954,7 @@ pub async fn update_profile_settings(
         )
             .into_response();
     }
-    let Json(body) = match body {
+    let Json(mut body) = match body {
         Ok(b) => b,
         Err(rej) => return rej.into_response(),
     };
@@ -968,54 +965,32 @@ pub async fn update_profile_settings(
         )
             .into_response();
     }
-    // Validate allowed sections. Use the per-profile allowlist here, which
-    // is the global list plus `description` (a profile-only field).
-    if let Some(obj) = body.as_object() {
-        for key in obj.keys() {
-            if !ALLOWED_PROFILE_SETTINGS_SECTIONS.contains(&key.as_str()) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "validation_failed",
-                        "message": format!("Settings section '{}' is not allowed via the web API.", key)
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    // Body-shape elevation gate. The path-shape gate in
-    // `requires_elevation` exempts this endpoint so safe preference
-    // fields save without a passphrase re-prompt; tamper-surface fields
-    // (sandbox image, worktree templates, dangerous session entries)
-    // re-impose the elevation requirement here. Mirrors the 403
-    // payload shape the path-shape gate returns so the client's
-    // existing `elevation_required` handling (web/src/lib/
-    // fetchInterceptor.ts) fires `ElevationPrompt` unchanged. See
-    // #1510.
-    if state.login_manager.is_enabled() && body_requires_elevation(&body) {
-        let elevated = match session.as_ref() {
+    // Strip host-execution surfaces (`local_only`) before validation + merge,
+    // so a bundled patch keeps its safe leaves and silently drops the
+    // local-only ones; they can never become a profile override (#1692).
+    strip_local_only(&mut body);
+    // Resolve elevation up front. With login disabled (single-user local) the
+    // caller is always treated as elevated; with login enabled, only an
+    // elevated session may write a requires-elevation field.
+    let elevated = if state.login_manager.is_enabled() {
+        match session.as_ref() {
             Some(axum::Extension(AuthenticatedSession(id))) => {
                 state.login_manager.is_elevated(id).await
             }
             None => false,
-        };
-        if !elevated {
-            tracing::info!(
-                target: "auth.passphrase",
-                profile = %name,
-                "update_profile_settings: tamper-surface keys in patch without elevation; returning 403"
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "elevation_required",
-                    "message": "Re-enter the passphrase to continue"
-                })),
-            )
-                .into_response();
         }
+    } else {
+        true
+    };
+
+    // Validate every remaining leaf against the schema (single source of
+    // truth, #1692): unknown section/field -> 400, requires-elevation without
+    // elevation -> 403 elevation_required (mirrors the path-shape gate's
+    // payload so web/src/lib/fetchInterceptor.ts fires the passphrase prompt
+    // unchanged, see #1510), bad value -> 400. `description` is accepted here
+    // (a profile-only field) but rejected on the global endpoint.
+    if let Err(rej) = validate_patch(&body, Scope::Profile, elevated) {
+        return reject_response(rej);
     }
 
     let result = tokio::task::spawn_blocking(move || {
@@ -1058,39 +1033,38 @@ pub async fn update_profile_settings(
 
         let config = crate::session::load_profile_config(&name).unwrap_or_default();
         let mut current = serde_json::to_value(&config)?;
-        if let (Some(current_obj), Some(update_obj)) = (current.as_object_mut(), body.as_object()) {
+        // Apply each validated leaf onto the sparse override object. A null
+        // clears the override (revert to inheriting the global); anything else
+        // sets it. Sections are created lazily so a single-field patch never
+        // wipes its siblings. `description` is a top-level string, handled the
+        // same way (set, or removed on null).
+        if let Some(update_obj) = body.as_object() {
             for (key, value) in update_obj {
-                let mut value = value.clone();
-                if key == "session" {
-                    if let Some(session_obj) = value.as_object_mut() {
-                        for blocked in SESSION_BLOCKED_FIELDS {
-                            session_obj.remove(*blocked);
+                match value {
+                    serde_json::Value::Object(fields) => {
+                        for (field, fval) in fields {
+                            if fval.is_null() {
+                                clear_path(&mut current, key, field);
+                            } else if let Some(root) = current.as_object_mut() {
+                                let section = root
+                                    .entry(key.clone())
+                                    .or_insert_with(|| serde_json::json!({}));
+                                if let Some(sec) = section.as_object_mut() {
+                                    sec.insert(field.clone(), fval.clone());
+                                }
+                            }
                         }
                     }
-                }
-                if key == "cockpit" {
-                    if let Some(cockpit_obj) = value.as_object_mut() {
-                        for blocked in COCKPIT_BLOCKED_FIELDS {
-                            cockpit_obj.remove(*blocked);
+                    serde_json::Value::Null => {
+                        if let Some(root) = current.as_object_mut() {
+                            root.remove(key);
                         }
                     }
-                }
-                // Deep merge within sections so that sending a single field
-                // (e.g. {"session": {"yolo_mode_default": true}}) only sets
-                // that field as a profile override, preserving other existing
-                // overrides instead of replacing the entire section.
-                if let Some(existing) = current_obj.get_mut(key) {
-                    if let (Some(existing_obj), Some(new_obj)) =
-                        (existing.as_object_mut(), value.as_object())
-                    {
-                        for (k, v) in new_obj {
-                            existing_obj.insert(k.clone(), v.clone());
+                    other => {
+                        if let Some(root) = current.as_object_mut() {
+                            root.insert(key.clone(), other.clone());
                         }
-                    } else {
-                        current_obj.insert(key.clone(), value);
                     }
-                } else {
-                    current_obj.insert(key.clone(), value);
                 }
             }
         }

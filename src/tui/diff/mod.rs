@@ -365,10 +365,15 @@ impl DiffView {
         }
         match load_profile_config(&self.profile) {
             Ok(mut profile_config) => {
-                profile_config
-                    .diff
-                    .get_or_insert_with(Default::default)
-                    .split_view = Some(self.split_view);
+                // Overrides are sparse JSON (#1692): set diff.split_view in the
+                // generic override map rather than a typed DiffConfigOverride.
+                let diff = profile_config
+                    .overrides
+                    .entry("diff".to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = diff.as_object_mut() {
+                    obj.insert("split_view".to_string(), serde_json::json!(self.split_view));
+                }
                 if let Err(e) = save_profile_config(&self.profile, &profile_config) {
                     tracing::warn!(
                         "failed to persist diff split_view for profile {}: {e}",
