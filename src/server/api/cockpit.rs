@@ -1282,9 +1282,22 @@ pub async fn cockpit_enable(
     }
 
     // Tear down the tmux side. Best-effort: a stale tmux name should
-    // not block the swap.
-    if let Err(e) = instance.kill() {
-        tracing::warn!(target: "cockpit.switch", session = %id, "kill tmux failed: {e}");
+    // not block the swap. Run on a blocking pool worker because each
+    // kill shells out. Warn on agent kill failure to keep signal for
+    // this user-initiated action; ancillary kinds delegate to the
+    // shared helper so any future kind picked up by the audit lands
+    // here automatically.
+    let inst_for_kill = instance.clone();
+    let id_for_log = id.clone();
+    let kill_join = tokio::task::spawn_blocking(move || {
+        if let Err(e) = inst_for_kill.kill() {
+            tracing::warn!(target: "cockpit.switch", session = %inst_for_kill.id, "kill tmux failed: {e}");
+        }
+        inst_for_kill.kill_ancillary_tmux_sessions();
+    })
+    .await;
+    if let Err(join_err) = kill_join {
+        tracing::error!(target: "cockpit.switch", session = %id_for_log, "tmux teardown task panicked: {join_err}");
     }
     instance.cockpit_mode = true;
     instance.resume_intent = crate::session::ResumeIntent::Default;
