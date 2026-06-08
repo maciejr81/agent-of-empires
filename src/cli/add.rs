@@ -227,7 +227,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     // session (`session.tie_workdir_to_name`) can seed its directory leaf from
     // the title and start out aligned (#1927). The path-dependent duplicate
     // check still runs later, once `path` points at the worktree.
-    let storage = Storage::new(profile)?;
+    let storage = Storage::new_unwatched(profile)?;
     let (instances, _groups) = storage.load_with_groups()?;
     let final_title = resolve_session_title(&args, &instances)?;
 

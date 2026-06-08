@@ -918,8 +918,14 @@ pub async fn create_profile(
         )
             .into_response();
     }
-    match tokio::task::spawn_blocking(move || crate::session::create_profile(&body.name)).await {
-        Ok(Ok(())) => (StatusCode::CREATED, Json(serde_json::json!({"ok": true}))).into_response(),
+    let name_for_create = body.name.clone();
+    match tokio::task::spawn_blocking(move || crate::session::create_profile(&name_for_create))
+        .await
+    {
+        Ok(Ok(())) => {
+            crate::server::add_profile_disk_watch(&state, &body.name).await;
+            (StatusCode::CREATED, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Ok(Err(e)) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "create_failed", "message": e.to_string()})),
@@ -960,8 +966,14 @@ pub async fn delete_profile(
         )
             .into_response();
     }
-    match tokio::task::spawn_blocking(move || crate::session::delete_profile(&name)).await {
-        Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+    let name_for_delete = name.clone();
+    match tokio::task::spawn_blocking(move || crate::session::delete_profile(&name_for_delete))
+        .await
+    {
+        Ok(Ok(())) => {
+            crate::server::remove_profile_disk_watch(&state, &name).await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Ok(Err(e)) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "delete_failed", "message": e.to_string()})),
@@ -1014,8 +1026,14 @@ pub async fn rename_profile(
     }
     let old = name;
     let new = body.new_name;
+    let old_for_rewire = old.clone();
+    let new_for_rewire = new.clone();
     match tokio::task::spawn_blocking(move || crate::session::rename_profile(&old, &new)).await {
-        Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(Ok(())) => {
+            crate::server::rename_profile_disk_watch(&state, &old_for_rewire, &new_for_rewire)
+                .await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+        }
         Ok(Err(e)) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "rename_failed", "message": e.to_string()})),

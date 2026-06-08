@@ -1916,6 +1916,7 @@ impl App {
         for cand in candidates {
             match crate::session::idle_reap::claim_idle_stop(
                 &cand.profile,
+                crate::file_watch::FileWatchService::noop(),
                 &cand.session_id,
                 now,
                 cand.threshold_secs,

@@ -19,7 +19,7 @@ mod log_level;
 mod mcp;
 mod projects;
 mod sessions;
-mod system;
+pub(crate) mod system;
 mod telemetry;
 
 #[cfg(feature = "serve")]

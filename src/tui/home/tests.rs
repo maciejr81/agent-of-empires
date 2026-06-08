@@ -30,7 +30,7 @@ fn create_test_env_empty() -> TestEnv {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _storage = Storage::new("test").unwrap(); // ensure profile dir exists
+    let _storage = Storage::new_unwatched("test").unwrap(); // ensure profile dir exists
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(Some("test".to_string()), tools).unwrap();
     view.group_by = GroupByMode::Manual;
@@ -43,7 +43,7 @@ fn create_test_env_with_sessions(count: usize) -> TestEnv {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
     for i in 0..count {
         instances.push(Instance::new(
@@ -71,7 +71,7 @@ fn create_test_env_with_groups() -> TestEnv {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
 
     let inst1 = Instance::new("ungrouped", "/tmp/u");
@@ -106,7 +106,7 @@ fn create_test_env_with_mixed_sessions() -> TestEnv {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
 
     let inst_ungrouped = Instance::new("Uncategorized", "/tmp/u");
@@ -636,7 +636,7 @@ fn test_enter_on_acp_session_opens_structured_view() {
     use crate::session::config::GroupByMode;
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = vec![
         Instance::new("plain", "/tmp/0"),
         Instance::new("acp", "/tmp/1"),
@@ -1169,7 +1169,7 @@ fn test_uppercase_p_picker_switch_profile() {
     crate::session::create_profile("first").unwrap();
     crate::session::create_profile("second").unwrap();
 
-    let _storage = Storage::new("first").unwrap();
+    let _storage = Storage::new_unwatched("first").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(Some("first".to_string()), tools).unwrap();
     view.group_by = crate::session::config::GroupByMode::Manual;
@@ -1362,7 +1362,7 @@ fn create_test_env_with_group_sessions() -> TestEnv {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
     let mut instances = Vec::new();
 
     // Ungrouped session
@@ -1417,7 +1417,7 @@ fn test_group_has_managed_worktrees() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
     inst1.group_path = "work".to_string();
@@ -1460,7 +1460,7 @@ fn test_group_has_containers() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
     inst1.group_path = "work".to_string();
@@ -1614,7 +1614,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
     inst1.group_path = "work".to_string();
@@ -1671,7 +1671,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/work");
     inst1.group_path = "work".to_string();
@@ -2185,7 +2185,7 @@ fn attention_env_running_then_waiting() -> (TestEnv, usize, usize) {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut running = Instance::new("running", "/tmp/running");
     running.status = Status::Running;
@@ -2699,7 +2699,7 @@ fn test_all_profiles_view_loads_from_multiple_profiles() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
         let xs = vec![Instance::new("Alpha Session", "/tmp/a")];
         storage_a
@@ -2711,7 +2711,7 @@ fn test_all_profiles_view_loads_from_multiple_profiles() {
             .unwrap();
     }
 
-    let storage_b = Storage::new("beta").unwrap();
+    let storage_b = Storage::new_unwatched("beta").unwrap();
     {
         let xs = vec![Instance::new("Beta Session", "/tmp/b")];
         storage_b
@@ -2745,7 +2745,7 @@ fn test_filtered_view_loads_single_profile() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
         let xs = vec![Instance::new("Alpha Session", "/tmp/a")];
         storage_a
@@ -2757,7 +2757,7 @@ fn test_filtered_view_loads_single_profile() {
             .unwrap();
     }
 
-    let storage_b = Storage::new("beta").unwrap();
+    let storage_b = Storage::new_unwatched("beta").unwrap();
     {
         let xs = vec![Instance::new("Beta Session", "/tmp/b")];
         storage_b
@@ -2786,7 +2786,7 @@ fn test_all_profiles_view_has_no_profile_headers() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
         let xs = vec![Instance::new("A1", "/tmp/a")];
         storage_a
@@ -2798,7 +2798,7 @@ fn test_all_profiles_view_has_no_profile_headers() {
             .unwrap();
     }
 
-    let storage_b = Storage::new("beta").unwrap();
+    let storage_b = Storage::new_unwatched("beta").unwrap();
     {
         let xs = vec![Instance::new("B1", "/tmp/b")];
         storage_b
@@ -2832,7 +2832,7 @@ fn test_all_profiles_view_shows_all_sessions_flat() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     {
         let xs = vec![Instance::new("A1", "/tmp/a")];
         storage_a
@@ -2844,7 +2844,7 @@ fn test_all_profiles_view_shows_all_sessions_flat() {
             .unwrap();
     }
 
-    let storage_b = Storage::new("beta").unwrap();
+    let storage_b = Storage::new_unwatched("beta").unwrap();
     {
         let xs = vec![Instance::new("B1", "/tmp/b")];
         storage_b
@@ -2889,7 +2889,7 @@ fn test_default_row_tag_mode_renders_no_tag() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     let instances_a = vec![Instance::new("A1", "/tmp/a")];
     let group_tree_a = GroupTree::new_with_groups(&instances_a, &[]);
     storage_a
@@ -2925,7 +2925,7 @@ fn test_row_tag_auto_renders_profile_in_all_profiles_view() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     let instances_a = vec![Instance::new("A1", "/tmp/a")];
     let group_tree_a = GroupTree::new_with_groups(&instances_a, &[]);
     storage_a
@@ -2936,7 +2936,7 @@ fn test_row_tag_auto_renders_profile_in_all_profiles_view() {
         })
         .unwrap();
 
-    let storage_b = Storage::new("beta").unwrap();
+    let storage_b = Storage::new_unwatched("beta").unwrap();
     let instances_b = vec![Instance::new("B1", "/tmp/b")];
     let group_tree_b = GroupTree::new_with_groups(&instances_b, &[]);
     storage_b
@@ -2983,7 +2983,7 @@ fn test_row_tag_auto_omits_tag_in_filtered_view() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     let instances_a = vec![Instance::new("A1", "/tmp/a")];
     let group_tree_a = GroupTree::new_with_groups(&instances_a, &[]);
     storage_a
@@ -3026,7 +3026,7 @@ fn test_row_tag_profile_renders_in_filtered_view() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     let instances_a = vec![Instance::new("A1", "/tmp/a")];
     let group_tree_a = GroupTree::new_with_groups(&instances_a, &[]);
     storage_a
@@ -3075,7 +3075,7 @@ fn test_row_tag_branch_dedups_with_divergence_display() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage = Storage::new("alpha").unwrap();
+    let storage = Storage::new_unwatched("alpha").unwrap();
     // Title and branch DIFFER, so the existing divergence display
     // would render the branch.
     let mut inst = Instance::new("my-session", "/tmp/a");
@@ -3130,7 +3130,7 @@ fn test_row_tag_branch_renders_when_title_matches_branch() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage = Storage::new("alpha").unwrap();
+    let storage = Storage::new_unwatched("alpha").unwrap();
     // Title and branch MATCH, so the divergence display stays quiet.
     let mut inst = Instance::new("feature/foo", "/tmp/a");
     inst.worktree_info = Some(crate::session::WorktreeInfo {
@@ -3184,7 +3184,7 @@ fn test_row_tag_auto_skips_for_empty_source_profile() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
 
-    let storage = Storage::new("legacy").unwrap();
+    let storage = Storage::new_unwatched("legacy").unwrap();
     let mut inst = Instance::new("Legacy1", "/tmp/legacy");
     inst.source_profile = String::new();
     let instances = vec![inst];
@@ -3224,7 +3224,7 @@ fn test_create_session_in_all_mode_is_findable() {
     setup_test_home(&temp);
 
     // Create a profile so "all" mode has something
-    let storage = Storage::new("alpha").unwrap();
+    let storage = Storage::new_unwatched("alpha").unwrap();
     {
         let xs = vec![Instance::new("Existing", "/tmp/a")];
         storage
@@ -3287,7 +3287,7 @@ fn test_save_preserves_per_profile_collapsed_state() {
     setup_test_home(&temp);
 
     // Create alpha with group "work" (collapsed)
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     let mut inst_a = Instance::new("A1", "/tmp/a");
     inst_a.group_path = "work".to_string();
     let mut tree_a = GroupTree::new_with_groups(&[inst_a.clone()], &[]);
@@ -3301,7 +3301,7 @@ fn test_save_preserves_per_profile_collapsed_state() {
         .unwrap();
 
     // Create beta with group "work" (expanded, the default)
-    let storage_b = Storage::new("beta").unwrap();
+    let storage_b = Storage::new_unwatched("beta").unwrap();
     let mut inst_b = Instance::new("B1", "/tmp/b");
     inst_b.group_path = "work".to_string();
     let tree_b = GroupTree::new_with_groups(&[inst_b.clone()], &[]);
@@ -3373,7 +3373,7 @@ fn test_save_preserves_per_profile_collapsed_state() {
 fn test_create_profile_rejects_reserved_name_all() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _storage = Storage::new("default").unwrap();
+    let _storage = Storage::new_unwatched("default").unwrap();
 
     let result = crate::session::create_profile("all");
     assert!(result.is_err());
@@ -3396,7 +3396,7 @@ fn test_delete_group_scoped_to_owning_profile() {
     setup_test_home(&temp);
 
     // Create alpha with group "work"
-    let storage_a = Storage::new("alpha").unwrap();
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
     let mut inst_a = Instance::new("A1", "/tmp/a");
     inst_a.group_path = "work".to_string();
     let tree_a = GroupTree::new_with_groups(&[inst_a.clone()], &[]);
@@ -3409,7 +3409,7 @@ fn test_delete_group_scoped_to_owning_profile() {
         .unwrap();
 
     // Create beta with the same group name "work"
-    let storage_b = Storage::new("beta").unwrap();
+    let storage_b = Storage::new_unwatched("beta").unwrap();
     let mut inst_b = Instance::new("B1", "/tmp/b");
     inst_b.group_path = "work".to_string();
     let tree_b = GroupTree::new_with_groups(&[inst_b.clone()], &[]);
@@ -3549,7 +3549,7 @@ fn test_shift_n_prefills_main_repo_path_for_worktree_session() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst = Instance::new("worktree-session", "/tmp/repo-worktrees/feature-branch");
     inst.worktree_info = Some(WorktreeInfo {
@@ -3674,7 +3674,7 @@ fn test_rename_selected_group_with_children() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("parent-session", "/tmp/p");
     inst1.group_path = "work".to_string();
@@ -3779,7 +3779,7 @@ fn test_rename_group_removes_old_path() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst = Instance::new("work-session", "/tmp/w");
     inst.group_path = "work".to_string();
@@ -3818,7 +3818,7 @@ fn test_rename_group_empty_group() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let instances: Vec<Instance> = vec![];
     let mut group_tree = GroupTree::new_with_groups(&instances, &[]);
@@ -3863,7 +3863,7 @@ fn test_rename_group_duplicate_returns_error() {
 
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("work-session", "/tmp/w");
     inst1.group_path = "work".to_string();
@@ -3907,7 +3907,7 @@ fn test_rename_group_resort_az() {
     config.app_state.sort_order = Some(SortOrder::AZ);
     save_config(&config).unwrap();
 
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut inst1 = Instance::new("s1", "/tmp/1");
     inst1.group_path = "zzz".to_string();
@@ -4124,7 +4124,7 @@ fn test_cursor_follows_session_after_deletion() {
 fn home_defaults_to_agent_when_config_unset() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _storage = Storage::new("test").unwrap();
+    let _storage = Storage::new_unwatched("test").unwrap();
 
     let tools = AvailableTools::with_tools(&["claude"]);
     let view = HomeView::new(Some("test".to_string()), tools).unwrap();
@@ -5043,7 +5043,7 @@ fn create_test_env_two_projects_mixed_attention() -> TestEnv {
     use crate::session::Status;
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let storage = Storage::new("test").unwrap();
+    let storage = Storage::new_unwatched("test").unwrap();
 
     let mut alpha_waiting = Instance::new("alpha-waiting", "/repos/alpha");
     alpha_waiting.status = Status::Waiting;
@@ -5335,8 +5335,8 @@ fn manual_grouping_attention_sort_stays_flat() {
 fn prune_empty_group_drops_source_when_no_session_remains() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _ = Storage::new("alpha").unwrap();
-    let _ = Storage::new("beta").unwrap();
+    let _ = Storage::new_unwatched("alpha").unwrap();
+    let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(None, tools).unwrap();
 
@@ -5373,8 +5373,8 @@ fn prune_empty_group_drops_source_when_no_session_remains() {
 fn prune_empty_group_keeps_source_when_sibling_session_remains() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _ = Storage::new("alpha").unwrap();
-    let _ = Storage::new("beta").unwrap();
+    let _ = Storage::new_unwatched("alpha").unwrap();
+    let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(None, tools).unwrap();
 
@@ -5410,8 +5410,8 @@ fn prune_empty_group_keeps_source_when_sibling_session_remains() {
 fn prune_empty_group_keeps_source_when_descendant_session_remains() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _ = Storage::new("alpha").unwrap();
-    let _ = Storage::new("beta").unwrap();
+    let _ = Storage::new_unwatched("alpha").unwrap();
+    let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(None, tools).unwrap();
 
@@ -5449,8 +5449,8 @@ fn prune_empty_group_keeps_source_when_descendant_session_remains() {
 fn prune_empty_group_keeps_source_when_descendant_group_remains() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _ = Storage::new("alpha").unwrap();
-    let _ = Storage::new("beta").unwrap();
+    let _ = Storage::new_unwatched("alpha").unwrap();
+    let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view = HomeView::new(None, tools).unwrap();
 
@@ -5490,8 +5490,8 @@ fn prune_empty_group_keeps_source_when_descendant_group_remains() {
 fn prune_empty_group_survives_save_and_reload() {
     let temp = TempDir::new().unwrap();
     setup_test_home(&temp);
-    let _ = Storage::new("alpha").unwrap();
-    let _ = Storage::new("beta").unwrap();
+    let _ = Storage::new_unwatched("alpha").unwrap();
+    let _ = Storage::new_unwatched("beta").unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
 
     {
@@ -9118,7 +9118,7 @@ mod save_field_merge {
     fn boot_view_with_one_session(title: &str, path: &str) -> (TempDir, HomeView, String) {
         let temp = TempDir::new().unwrap();
         setup_test_home(&temp);
-        let storage = Storage::new("test").unwrap();
+        let storage = Storage::new_unwatched("test").unwrap();
         let inst = Instance::new(title, path);
         let id = inst.id.clone();
         storage
@@ -9139,7 +9139,7 @@ mod save_field_merge {
     fn test_save_preserves_peer_field_update() {
         let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
-        let peer_storage = Storage::new("test").unwrap();
+        let peer_storage = Storage::new_unwatched("test").unwrap();
         let peer_archived_at = Utc::now();
         peer_storage
             .update(|insts, _| {
@@ -9152,7 +9152,7 @@ mod save_field_merge {
 
         view.save().expect("save must merge peer-owned field write");
 
-        let reloaded = Storage::new("test").unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched("test").unwrap().load().unwrap();
         let row = reloaded.iter().find(|i| i.id == id).expect("row present");
         assert_eq!(
             row.archived_at,
@@ -9166,7 +9166,7 @@ mod save_field_merge {
     fn test_save_preserves_peer_added_row() {
         let (_temp, mut view, _id) = boot_view_with_one_session("a", "/tmp/a");
 
-        let peer_storage = Storage::new("test").unwrap();
+        let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
             .update(|insts, _| {
                 insts.push(Instance::new("peer-added", "/tmp/peer"));
@@ -9177,7 +9177,7 @@ mod save_field_merge {
         view.save()
             .expect("save must not delete rows the TUI does not know about");
 
-        let reloaded = Storage::new("test").unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched("test").unwrap().load().unwrap();
         assert!(
             reloaded.iter().any(|i| i.title == "peer-added"),
             "peer-added row must survive TUI save"
@@ -9196,7 +9196,7 @@ mod save_field_merge {
         view.remove_instance(&id);
         view.save().expect("save must propagate the delete");
 
-        let reloaded = Storage::new("test").unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched("test").unwrap().load().unwrap();
         assert!(
             !reloaded.iter().any(|i| i.id == id),
             "tombstoned row must be removed from disk"
@@ -9229,7 +9229,7 @@ mod save_field_merge {
     fn test_save_preserves_peer_added_group() {
         let (_temp, mut view, _id) = boot_view_with_one_session("a", "/tmp/a");
 
-        let peer_storage = Storage::new("test").unwrap();
+        let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
             .update(|_insts, groups| {
                 groups.push(crate::session::Group::new("peer-grp", "peer-grp"));
@@ -9240,7 +9240,11 @@ mod save_field_merge {
         view.save()
             .expect("save must not clobber groups the TUI does not know about");
 
-        let reloaded = Storage::new("test").unwrap().load_with_groups().unwrap().1;
+        let reloaded = Storage::new_unwatched("test")
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .1;
         assert!(
             reloaded.iter().any(|g| g.path == "peer-grp"),
             "peer-added group must survive TUI save"
@@ -9255,7 +9259,7 @@ mod save_field_merge {
         view.apply_user_action(&id, |inst| inst.archive())
             .expect("apply_user_action must persist");
 
-        let reloaded = Storage::new("test").unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched("test").unwrap().load().unwrap();
         let row = reloaded.iter().find(|i| i.id == id).expect("row present");
         assert!(
             row.archived_at.is_some(),
@@ -9268,7 +9272,7 @@ mod save_field_merge {
     fn test_apply_user_action_does_not_clobber_peer_field() {
         let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
-        let peer_storage = Storage::new("test").unwrap();
+        let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
             .update(|insts, _| {
                 if let Some(inst) = insts.iter_mut().find(|i| i.id == id) {
@@ -9281,7 +9285,7 @@ mod save_field_merge {
         view.apply_user_action(&id, |inst| inst.archive())
             .expect("archive must persist");
 
-        let reloaded = Storage::new("test").unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched("test").unwrap().load().unwrap();
         let row = reloaded.iter().find(|i| i.id == id).expect("row present");
         assert!(row.archived_at.is_some(), "TUI archive landed");
         assert_eq!(
@@ -9303,7 +9307,7 @@ mod save_field_merge {
             .get_instance(&id)
             .expect("in-memory row present")
             .archived_at;
-        let disk_ts = Storage::new("test")
+        let disk_ts = Storage::new_unwatched("test")
             .unwrap()
             .load()
             .unwrap()
@@ -9328,7 +9332,7 @@ mod save_field_merge {
         // contradictory triage state on the next render.
         let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
-        let peer_storage = Storage::new("test").unwrap();
+        let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
             .update(|insts, _| {
                 if let Some(inst) = insts.iter_mut().find(|i| i.id == id) {
@@ -9341,7 +9345,7 @@ mod save_field_merge {
         view.apply_user_action(&id, |inst| inst.archive())
             .expect("archive must persist");
 
-        let reloaded = Storage::new("test").unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched("test").unwrap().load().unwrap();
         let row = reloaded.iter().find(|i| i.id == id).expect("row present");
         assert!(row.archived_at.is_some(), "TUI archive landed");
         assert!(
@@ -9360,7 +9364,7 @@ mod save_field_merge {
         // invariant from the archive XOR rules tested above.
         let (_temp, mut view, id) = boot_view_with_one_session("session", "/tmp/race");
 
-        let peer_storage = Storage::new("test").unwrap();
+        let peer_storage = Storage::new_unwatched("test").unwrap();
         peer_storage
             .update(|insts, _| {
                 if let Some(inst) = insts.iter_mut().find(|i| i.id == id) {
@@ -9373,7 +9377,7 @@ mod save_field_merge {
         view.apply_user_action(&id, |inst| inst.snooze(30))
             .expect("snooze must persist");
 
-        let reloaded = Storage::new("test").unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched("test").unwrap().load().unwrap();
         let row = reloaded.iter().find(|i| i.id == id).expect("row present");
         assert!(row.snoozed_until.is_some(), "TUI snooze landed");
         assert_eq!(
@@ -9389,7 +9393,7 @@ mod save_field_merge {
 
         // Simulate `aoe session remove victim` from another process: peer
         // deletes the row from disk while TUI still has it in memory.
-        Storage::new("test")
+        Storage::new_unwatched("test")
             .unwrap()
             .update(|insts, _g| {
                 insts.retain(|i| i.id != id);
@@ -9408,7 +9412,7 @@ mod save_field_merge {
             view.get_instance(&id).is_none(),
             "peer-deleted row must be dropped from instance_map"
         );
-        let disk = Storage::new("test").unwrap().load().unwrap();
+        let disk = Storage::new_unwatched("test").unwrap().load().unwrap();
         assert!(
             !disk.iter().any(|i| i.id == id),
             "save() must not resurrect the peer-deleted row on disk"
@@ -9427,7 +9431,7 @@ mod save_field_merge {
 
         view.save().expect("save must persist TUI-added row");
 
-        let disk = Storage::new("test").unwrap().load().unwrap();
+        let disk = Storage::new_unwatched("test").unwrap().load().unwrap();
         assert!(
             disk.iter().any(|i| i.id == new_id),
             "TUI-added row must be persisted to disk"
@@ -9451,7 +9455,7 @@ mod save_field_merge {
 
         view.save().expect("save must succeed");
 
-        let disk = Storage::new("test").unwrap().load().unwrap();
+        let disk = Storage::new_unwatched("test").unwrap().load().unwrap();
         assert!(
             !disk.iter().any(|i| i.id == new_id),
             "add+remove in same save cycle must not leak the row to disk"
@@ -9462,8 +9466,10 @@ mod save_field_merge {
     #[serial]
     fn test_move_to_profile_marks_tombstone_and_pending_added() {
         let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
-        view.storages
-            .insert("target".to_string(), Storage::new("target").unwrap());
+        view.storages.insert(
+            "target".to_string(),
+            Storage::new_unwatched("target").unwrap(),
+        );
 
         view.move_to_profile(&id, "target", "moved/group".to_string())
             .unwrap();
@@ -9489,14 +9495,16 @@ mod save_field_merge {
     #[serial]
     fn test_move_to_profile_save_roundtrip_persists_under_target() {
         let (_temp, mut view, id) = boot_view_with_one_session("victim", "/tmp/move");
-        view.storages
-            .insert("target".to_string(), Storage::new("target").unwrap());
+        view.storages.insert(
+            "target".to_string(),
+            Storage::new_unwatched("target").unwrap(),
+        );
 
         view.move_to_profile(&id, "target", String::new()).unwrap();
         view.save().expect("save must succeed across profiles");
 
-        let old_disk = Storage::new("test").unwrap().load().unwrap();
-        let new_disk = Storage::new("target").unwrap().load().unwrap();
+        let old_disk = Storage::new_unwatched("test").unwrap().load().unwrap();
+        let new_disk = Storage::new_unwatched("target").unwrap().load().unwrap();
         assert!(
             !old_disk.iter().any(|i| i.id == id),
             "old profile disk must NOT contain the moved row"
@@ -9535,7 +9543,7 @@ mod save_field_merge {
         view.save().unwrap();
 
         // Peer clears the sid on disk (simulates `aoe session set-session-id ""`).
-        Storage::new("test")
+        Storage::new_unwatched("test")
             .unwrap()
             .update(|insts, _g| {
                 if let Some(inst) = insts.iter_mut().find(|i| i.id == id) {
@@ -9593,7 +9601,7 @@ mod save_field_merge {
             !view.get_instance(&id).unwrap().is_archived(),
             "stamp_last_accessed must clear archived_at in memory"
         );
-        let disk_row = Storage::new("test")
+        let disk_row = Storage::new_unwatched("test")
             .unwrap()
             .load()
             .unwrap()
@@ -9632,7 +9640,7 @@ mod save_field_merge {
             !view.get_instance(&id).unwrap().is_snoozed(),
             "stamp_last_accessed must clear snoozed_until in memory"
         );
-        let disk_row = Storage::new("test")
+        let disk_row = Storage::new_unwatched("test")
             .unwrap()
             .load()
             .unwrap()
@@ -10133,7 +10141,7 @@ mod apply_session_id_updates {
 
     fn build_view_with_inst(profile: &str, inst: &Instance) -> HomeView {
         use crate::session::config::GroupByMode;
-        let storage = Storage::new(profile).unwrap();
+        let storage = Storage::new_unwatched(profile).unwrap();
         storage
             .update(|i, g| {
                 *i = vec![inst.clone()];
@@ -10262,7 +10270,7 @@ mod apply_session_id_updates {
         inst.agent_session_id = Some(peer_sid.to_string());
         let mut view = build_view_with_inst(profile, &inst);
 
-        let storage = Storage::new(profile).unwrap();
+        let storage = Storage::new_unwatched(profile).unwrap();
         storage
             .update(|i, _g| {
                 i[0].agent_session_id = Some(other_peer.to_string());

@@ -853,7 +853,7 @@ pub async fn rename_session(
     // old path after a daemon restart, so it returns 500 rather than a
     // misleading 200.
     let persisted = {
-        let storage = Storage::new(&profile);
+        let storage = Storage::new(&profile, state.file_watch.clone());
         let title_clone = title.clone();
         let id_clone = id.clone();
         let new_path_clone = new_path.clone();
@@ -1114,7 +1114,7 @@ pub async fn set_worktree_name(
             .into_response()
     };
 
-    let storage = match Storage::new(&profile) {
+    let storage = match Storage::new(&profile, state.file_watch.clone()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(target: "http.api.sessions", session = %id, "Storage::new failed after worktree edit: {e}");
@@ -1247,11 +1247,16 @@ pub async fn update_session_group(
     // Persist first; only mutate memory once disk is durable. See #1589.
     let persist_id = id.clone();
     let persist_group = group.clone();
-    if persist_session_update(profile, "group update", move |instances| {
-        if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
-            apply_session_group(inst, persist_group);
-        }
-    })
+    if persist_session_update(
+        profile,
+        "group update",
+        state.file_watch.clone(),
+        move |instances| {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                apply_session_group(inst, persist_group);
+            }
+        },
+    )
     .await
     .is_err()
     {
@@ -1329,12 +1334,13 @@ where
 async fn persist_session_update<F>(
     profile: String,
     label: &'static str,
+    file_watch: std::sync::Arc<crate::file_watch::FileWatchService>,
     mutate: F,
 ) -> Result<(), ()>
 where
     F: FnOnce(&mut Vec<Instance>) + Send + 'static,
 {
-    let storage = match Storage::new(&profile) {
+    let storage = match Storage::new(&profile, file_watch) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
@@ -1436,13 +1442,18 @@ pub async fn update_session_notifications(
     // Persist first; only mutate memory once disk is durable so a write
     // failure leaves the two in agreement. See #1589.
     let persist_id = id.clone();
-    if persist_session_update(profile, "notification update", move |instances| {
-        if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
-            apply(&mut inst.notify_on_waiting, waiting);
-            apply(&mut inst.notify_on_idle, idle);
-            apply(&mut inst.notify_on_error, error);
-        }
-    })
+    if persist_session_update(
+        profile,
+        "notification update",
+        state.file_watch.clone(),
+        move |instances| {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                apply(&mut inst.notify_on_waiting, waiting);
+                apply(&mut inst.notify_on_idle, idle);
+                apply(&mut inst.notify_on_error, error);
+            }
+        },
+    )
     .await
     .is_err()
     {
@@ -1529,11 +1540,16 @@ pub async fn update_session_diff_base(
     // Persist first; only mutate memory once disk is durable. See #1589.
     let persist_id = id.clone();
     let persist_override = new_override.clone();
-    if persist_session_update(profile, "diff-base update", move |instances| {
-        if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
-            inst.base_branch_override = persist_override;
-        }
-    })
+    if persist_session_update(
+        profile,
+        "diff-base update",
+        state.file_watch.clone(),
+        move |instances| {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                inst.base_branch_override = persist_override;
+            }
+        },
+    )
     .await
     .is_err()
     {
@@ -1637,15 +1653,20 @@ pub async fn update_session_pin(
 
     // Persist first; only mutate memory once disk is durable. See #1589.
     let persist_id = id.clone();
-    if persist_session_update(profile, "pin update", move |instances| {
-        if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
-            if pinned {
-                inst.pin();
-            } else {
-                inst.unpin();
+    if persist_session_update(
+        profile,
+        "pin update",
+        state.file_watch.clone(),
+        move |instances| {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                if pinned {
+                    inst.pin();
+                } else {
+                    inst.unpin();
+                }
             }
-        }
-    })
+        },
+    )
     .await
     .is_err()
     {
@@ -1713,15 +1734,20 @@ pub async fn update_session_archive(
 
     let archived = body.archived;
     let persist_id = id.clone();
-    if persist_session_update(profile, "archive update", move |instances| {
-        if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
-            if archived {
-                inst.archive();
-            } else {
-                inst.unarchive();
+    if persist_session_update(
+        profile,
+        "archive update",
+        state.file_watch.clone(),
+        move |instances| {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                if archived {
+                    inst.archive();
+                } else {
+                    inst.unarchive();
+                }
             }
-        }
-    })
+        },
+    )
     .await
     .is_err()
     {
@@ -1898,14 +1924,19 @@ pub async fn update_session_snooze(
     // Persist first; only mutate memory once disk is durable, and only fire
     // the structured view teardown below on a write that landed. See #1589.
     let persist_id = id.clone();
-    if persist_session_update(profile, "snooze update", move |instances| {
-        if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
-            match minutes {
-                Some(m) => inst.snooze(m),
-                None => inst.unsnooze(),
+    if persist_session_update(
+        profile,
+        "snooze update",
+        state.file_watch.clone(),
+        move |instances| {
+            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                match minutes {
+                    Some(m) => inst.snooze(m),
+                    None => inst.unsnooze(),
+                }
             }
-        }
-    })
+        },
+    )
     .await
     .is_err()
     {
@@ -2090,7 +2121,7 @@ pub async fn delete_session(
             // would silently re-add the entry from disk on the next tick
             // and the user would see "deleted" then the session
             // reappearing seconds later.
-            let storage = match Storage::new(&profile) {
+            let storage = match Storage::new(&profile, state.file_watch.clone()) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!(target: "http.api.sessions",
@@ -2455,6 +2486,8 @@ pub async fn create_session(
         .collect();
     drop(instances);
 
+    let file_watch_for_create = state.file_watch.clone();
+
     let result = tokio::task::spawn_blocking(move || {
         use crate::session::builder::{self, InstanceParams};
         use crate::session::Config;
@@ -2601,7 +2634,7 @@ pub async fn create_session(
         // tripped. Matches the CLI cleanup path in
         // `cleanup_partial_session(... scratch_dir: Some(...))`.
         let mut persist_and_start = || -> anyhow::Result<()> {
-            let storage = Storage::new(&profile)?;
+            let storage = Storage::new(&profile, file_watch_for_create.clone())?;
             let to_persist = instance.clone();
             storage.update(|all, _groups| {
                 all.push(to_persist);
@@ -4725,7 +4758,7 @@ mod tests {
         let _ = isolated_app_dir(temp_home.path());
 
         let profile = "persist-success";
-        let storage = Storage::new(profile).unwrap();
+        let storage = Storage::new_unwatched(profile).unwrap();
         let seed = make_test_instance();
         let id = seed.id.clone();
         storage
@@ -4736,15 +4769,20 @@ mod tests {
             .unwrap();
 
         let persist_id = id.clone();
-        persist_session_update(profile.to_string(), "test", move |instances| {
-            if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
-                inst.base_branch_override = Some("release/x".to_string());
-            }
-        })
+        persist_session_update(
+            profile.to_string(),
+            "test",
+            crate::file_watch::FileWatchService::noop(),
+            move |instances| {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                    inst.base_branch_override = Some("release/x".to_string());
+                }
+            },
+        )
         .await
         .expect("persist should succeed");
 
-        let reloaded = Storage::new(profile).unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched(profile).unwrap().load().unwrap();
         let inst = reloaded.iter().find(|i| i.id == id).unwrap();
         assert_eq!(
             inst.base_branch_override.as_deref(),
@@ -4766,7 +4804,13 @@ mod tests {
         let dir = crate::session::get_profile_dir(profile).unwrap();
         std::fs::create_dir_all(dir.join("sessions.json")).unwrap();
 
-        let result = persist_session_update(profile.to_string(), "test", |_instances| {}).await;
+        let result = persist_session_update(
+            profile.to_string(),
+            "test",
+            crate::file_watch::FileWatchService::noop(),
+            |_instances| {},
+        )
+        .await;
         assert!(result.is_err(), "a storage failure must surface as Err");
     }
 
@@ -4782,7 +4826,7 @@ mod tests {
         let _ = isolated_app_dir(temp_home.path());
 
         let profile = "group-edit";
-        let storage = Storage::new(profile).unwrap();
+        let storage = Storage::new_unwatched(profile).unwrap();
         let seed = make_test_instance(); // seeded in "work/projects"
         let id = seed.id.clone();
         storage
@@ -4794,15 +4838,20 @@ mod tests {
 
         // Move to a brand-new group.
         let set_id = id.clone();
-        persist_session_update(profile.to_string(), "group update", move |instances| {
-            if let Some(inst) = instances.iter_mut().find(|i| i.id == set_id) {
-                apply_session_group(inst, "team/alpha".to_string());
-            }
-        })
+        persist_session_update(
+            profile.to_string(),
+            "group update",
+            crate::file_watch::FileWatchService::noop(),
+            move |instances| {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == set_id) {
+                    apply_session_group(inst, "team/alpha".to_string());
+                }
+            },
+        )
         .await
         .expect("set should succeed");
 
-        let reloaded = Storage::new(profile).unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched(profile).unwrap().load().unwrap();
         assert_eq!(
             reloaded.iter().find(|i| i.id == id).unwrap().group_path,
             "team/alpha",
@@ -4811,15 +4860,20 @@ mod tests {
 
         // Clear to ungrouped via the empty-string sentinel.
         let clear_id = id.clone();
-        persist_session_update(profile.to_string(), "group update", move |instances| {
-            if let Some(inst) = instances.iter_mut().find(|i| i.id == clear_id) {
-                apply_session_group(inst, String::new());
-            }
-        })
+        persist_session_update(
+            profile.to_string(),
+            "group update",
+            crate::file_watch::FileWatchService::noop(),
+            move |instances| {
+                if let Some(inst) = instances.iter_mut().find(|i| i.id == clear_id) {
+                    apply_session_group(inst, String::new());
+                }
+            },
+        )
         .await
         .expect("clear should succeed");
 
-        let reloaded = Storage::new(profile).unwrap().load().unwrap();
+        let reloaded = Storage::new_unwatched(profile).unwrap().load().unwrap();
         assert_eq!(
             reloaded.iter().find(|i| i.id == id).unwrap().group_path,
             "",
@@ -4994,7 +5048,7 @@ pub async fn send_message(
             let started_for_save = started.clone();
             let outcome_already_alive = matches!(outcome, EnsureReadyOutcome::AlreadyAlive);
             tokio::task::spawn_blocking(move || {
-                if let Ok(storage) = Storage::new(&profile) {
+                if let Ok(storage) = Storage::new(&profile, state.file_watch.clone()) {
                     if let Err(e) = storage.update(|all, _groups| {
                         if let Some(disk_inst) = all.iter_mut().find(|i| i.id == id_for_save) {
                             if !outcome_already_alive {
