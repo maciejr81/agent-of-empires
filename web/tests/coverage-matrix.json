@@ -1104,6 +1104,13 @@
       "components": ["web/src/hooks/useAcpSession.ts"]
     },
     {
+      "id": "acp.attention-chime",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/acp/__tests__/AttentionChime.test.tsx"],
+      "components": ["web/src/components/acp/AttentionChime.tsx", "web/src/components/acp/StructuredView.tsx"]
+    },
+    {
       "id": "acp.elicitation-card",
       "kind": "vitest",
       "risk": "high",
