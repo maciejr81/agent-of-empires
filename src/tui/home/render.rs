@@ -1704,13 +1704,26 @@ impl HomeView {
                         .and_then(|inst| inst.tmux_session().ok())
                         .filter(|s| s.exists())
                     {
-                        // Defer to an active size owner (a phone/desktop live
-                        // client, or this TUI's own live-send below). The
-                        // detached preview is a passive display, so it only
+                        // Defer to whoever is actually driving this window:
+                        //   * A real attached tmux client (a `tmux attach`,
+                        //     out-of-band or via aoe). The size-owner lock does
+                        //     not cover it, so check it explicitly. Resizing to
+                        //     the preview area here would pin the user's live
+                        //     terminal to the narrow preview width and `manual`
+                        //     sizing would block it from growing back. Restore
+                        //     `window-size latest` so the attached client sizes
+                        //     the window to itself, undoing any earlier manual
+                        //     pin from a detached preview.
+                        //   * An active size owner (a phone/desktop live client,
+                        //     or this TUI's own live-send below) that drives its
+                        //     own size; never reset that out from under it.
+                        // The detached preview is a passive display: it only
                         // sizes a session nobody else is driving and never
-                        // claims the lock itself; leaving the dedup unset
-                        // retries once the owner disconnects.
-                        if !session.has_active_size_owner() {
+                        // claims the lock itself.
+                        if session.has_attached_client() {
+                            session.reset_size_to_latest_client();
+                            self.preview_pane_synced = Some(want);
+                        } else if !session.has_active_size_owner() {
                             session.resize_window(width, height);
                             self.preview_pane_synced = Some(want);
                         }

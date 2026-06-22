@@ -639,6 +639,30 @@ impl Session {
             .output();
     }
 
+    /// Whether at least one tmux client is currently attached to this session.
+    ///
+    /// The detached preview sync must never resize a session a real client is
+    /// driving: shrinking the window to the (narrow) preview area pins the
+    /// user's attached terminal to that width, and the forced `manual` sizing
+    /// then blocks it from growing back. The size-owner lock only covers aoe's
+    /// own live viewers (TUI live-send, web PTY, mobile capture); a plain
+    /// `tmux attach` is invisible to it, so the preview path checks this too.
+    /// Best-effort: a missing session or a tmux error reads as "not attached"
+    /// so the preview still sizes a session nobody is looking at.
+    pub fn has_attached_client(&self) -> bool {
+        let out = Command::new("tmux")
+            .args([
+                "display-message",
+                "-t",
+                &self.name,
+                "-p",
+                "#{session_attached}",
+            ])
+            .output();
+        matches!(out, Ok(o) if o.status.success()
+            && String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().unwrap_or(0) > 0)
+    }
+
     /// Resize the (detached) window to `cols`x`rows`. Best-effort: a missing
     /// session or a tmux ENOENT is swallowed so a transient failure never
     /// blocks a render.
@@ -1147,6 +1171,47 @@ mod tests {
         );
         session.release_size_owner("d");
         assert!(session.size_owner().is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn has_attached_client_is_false_for_detached_and_missing_sessions() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        // A detached session (`new-session -d`) has zero attached clients, so
+        // the preview path is free to size it; this guards against the method
+        // reading "attached" off the wrong format field and silently disabling
+        // every preview resize.
+        let guard = TmuxTestSession::new("aoe_test_attached");
+        let out = Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                guard.name(),
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sleep 30",
+            ])
+            .output()
+            .expect("tmux new-session");
+        assert!(out.status.success());
+        refresh_session_cache();
+        let session = Session::from_name(guard.name());
+        assert!(
+            !session.has_attached_client(),
+            "a detached session must report no attached client"
+        );
+
+        // A missing session reads as not-attached (best-effort), so the
+        // preview path treats it like any other unowned session rather than
+        // erroring.
+        let missing = Session::from_name("aoe_test_attached_missing_xyz");
+        assert!(!missing.has_attached_client());
     }
 
     #[test]
